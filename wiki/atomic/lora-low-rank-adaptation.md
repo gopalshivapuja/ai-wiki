@@ -5,6 +5,8 @@ type: zettel
 created: 2026-08-10
 updated: 2026-08-10
 tags: [zettel, atomic, fine-tuning, peft, lora, vram-efficiency]
+aliases:
+  - "20260810100500-lora-low-rank-adaptation"
 sources:
   - "sources/pdfs/attention-is-all-you-need-paper.md"
 ---
@@ -36,6 +38,6 @@ $$W = W_0 + \Delta W = W_0 + \frac{\alpha}{r} (B \cdot A)$$
 
 ## Related Knowledge & Links
 
-- `[[fine-tuning-and-alignment]]` — Overview of model adaptation techniques.
-- `[[hugging-face]]` — Maintains the `peft` library implementing LoRA.
-- `[[moc-llm-architectures]]` — Map of Content for model mechanics and fine-tuning.
+- [[fine-tuning-and-alignment]] — Overview of model adaptation techniques.
+- [[hugging-face]] — Maintains the `peft` library implementing LoRA.
+- [[moc-llm-architectures]] — Map of Content for model mechanics and fine-tuning.

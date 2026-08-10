@@ -5,6 +5,8 @@ type: zettel
 created: 2026-08-10
 updated: 2026-08-10
 tags: [zettel, atomic, react, ai-agents, reasoning, tool-use]
+aliases:
+  - "20260810100300-react-agent-loop"
 sources:
   - "sources/web/building-effective-agents-anthropic.md"
 ---
@@ -35,7 +37,7 @@ This interleaved loop allows the agent to recover from intermediate errors, refi
 
 ## Related Knowledge & Links
 
-- `[[20260810100400-evaluator-optimizer-pattern]]` — Secondary agent pattern focusing on quality refinement loops.
-- `[[ai-agents-and-tools]]` — Comprehensive overview of agentic patterns.
-- `[[building-effective-agents-anthropic]]` — Engineering best practices for ReAct implementation.
-- `[[moc-agentic-patterns]]` — Map of Content for agent architectures.
+- [[evaluator-optimizer-pattern|Evaluator-Optimizer Pattern]] — Secondary agent pattern focusing on quality refinement loops.
+- [[ai-agents-and-tools]] — Comprehensive overview of agentic patterns.
+- [[building-effective-agents-anthropic]] — Engineering best practices for ReAct implementation.
+- [[moc-agentic-patterns]] — Map of Content for agent architectures.

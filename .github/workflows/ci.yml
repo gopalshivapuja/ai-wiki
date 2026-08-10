@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main, 'cursor/**']
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install -e ".[api,dev]"
+          pip install -r requirements.txt
+
+      - name: Wiki lint
+        run: python -m wiki_cli.main lint
+
+      - name: Run tests
+        run: pytest tests/ -v
+
+      - name: Ruff check
+        run: ruff check packages/ tests/
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Build web
+        working-directory: apps/web
+        run: |
+          npm install
+          npm run build

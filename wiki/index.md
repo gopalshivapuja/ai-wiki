@@ -12,11 +12,11 @@ This index catalogs all compiled Maps of Content (MOCs), atomic Zettel notes, co
 ---
 
 ## 🧩 Atomic Zettel Notes (`wiki/atomic/`)
-- `[[20260810100100-scaled-dot-product-attention]]` — Q/K/V similarity calculation and scaling factor mechanics.
-- `[[20260810100200-multi-head-attention]]` — Parallel linear projections across representation subspaces.
-- `[[20260810100300-react-agent-loop]]` — Interleaved Thought-Action-Observation execution loop.
-- `[[20260810100400-evaluator-optimizer-pattern]]` — Generator-Critic feedback loop for iterative quality enhancement.
-- `[[20260810100500-lora-low-rank-adaptation]]` — Low-Rank matrix decomposition ($W_0 + BA$) for memory-efficient tuning.
+- [[scaled-dot-product-attention|Scaled Dot-Product Attention]] — Q/K/V similarity calculation and scaling factor mechanics.
+- [[multi-head-attention|Multi-Head Attention]] — Parallel linear projections across representation subspaces.
+- [[react-agent-loop|ReAct Agent Loop]] — Interleaved Thought-Action-Observation execution loop.
+- [[evaluator-optimizer-pattern|Evaluator-Optimizer Pattern]] — Generator-Critic feedback loop for iterative quality enhancement.
+- [[lora-low-rank-adaptation|LoRA Low-Rank Adaptation]] — Low-Rank matrix decomposition ($W_0 + BA$) for memory-efficient tuning.
 
 ---
 

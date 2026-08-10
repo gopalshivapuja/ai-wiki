@@ -15,8 +15,8 @@ This **Map of Content (MOC)** aggregates all atomic Zettel notes, system concept
 ---
 
 ## 1. Core Agentic Patterns (Atomic Zettels)
-- `[[20260810100300-react-agent-loop]]` — Interleaved Thought-Action-Observation environment control loop.
-- `[[20260810100400-evaluator-optimizer-pattern]]` — Generator-Critic feedback loop for iterative output critique and refinement.
+- [[react-agent-loop|ReAct Agent Loop]] — Interleaved Thought-Action-Observation environment control loop.
+- [[evaluator-optimizer-pattern|Evaluator-Optimizer Pattern]] — Generator-Critic feedback loop for iterative output critique and refinement.
 
 ## 2. High-Level Concept Overviews
 - [[ai-agents-and-tools]] — ReAct loops, tool registries, short-term vs long-term memory, multi-agent coordination.
@@ -36,7 +36,7 @@ This **Map of Content (MOC)** aggregates all atomic Zettel notes, system concept
 ```mermaid
 flowchart LR
     Guide["[[building-effective-agents-anthropic]]"] --> Overview["[[ai-agents-and-tools]]"]
-    Overview --> ReAct["[[20260810100300-react-agent-loop]]"]
-    Overview --> EvalOpt["[[20260810100400-evaluator-optimizer-pattern]]"]
+    Overview --> ReAct["[[react-agent-loop|ReAct Agent Loop]]"]
+    Overview --> EvalOpt["[[evaluator-optimizer-pattern|Evaluator-Optimizer Pattern]]"]
     ReAct --> WikiStore["[[retrieval-augmented-generation]] / [[AGENTS.md|LLM Wiki]]"]
 ```

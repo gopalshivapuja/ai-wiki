@@ -5,6 +5,8 @@ type: zettel
 created: 2026-08-10
 updated: 2026-08-10
 tags: [zettel, atomic, agent-patterns, critique, reflection, refinement]
+aliases:
+  - "20260810100400-evaluator-optimizer-pattern"
 sources:
   - "sources/web/building-effective-agents-anthropic.md"
 ---
@@ -36,7 +38,7 @@ The **Evaluator-Optimizer Pattern** is a two-role LLM workflow where one model (
 
 ## Related Knowledge & Links
 
-- `[[20260810100300-react-agent-loop]]` — Dynamic environment interaction loop.
-- `[[ai-agents-and-tools]]` — Overview of workflow patterns.
-- `[[building-effective-agents-anthropic]]` — Source document introducing Evaluator-Optimizer feedback design.
-- `[[moc-agentic-patterns]]` — Map of Content for agent workflows.
+- [[react-agent-loop|ReAct Agent Loop]] — Dynamic environment interaction loop.
+- [[ai-agents-and-tools]] — Overview of workflow patterns.
+- [[building-effective-agents-anthropic]] — Source document introducing Evaluator-Optimizer feedback design.
+- [[moc-agentic-patterns]] — Map of Content for agent workflows.
