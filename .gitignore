@@ -3,3 +3,11 @@ __pycache__/
 *.pyc
 .DS_Store
 *.tmp
+node_modules/
+dist/
+*.egg-info/
+.pytest_cache/
+apps/web/dist/
+*.tsbuildinfo
+*.db
+llm_wiki.egg-info/

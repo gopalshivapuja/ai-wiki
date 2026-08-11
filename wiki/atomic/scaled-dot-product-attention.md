@@ -5,6 +5,8 @@ type: zettel
 created: 2026-08-10
 updated: 2026-08-10
 tags: [zettel, atomic, attention, math, transformer]
+aliases:
+  - "20260810100100-scaled-dot-product-attention"
 sources:
   - "sources/pdfs/attention-is-all-you-need-paper.md"
 ---
@@ -33,6 +35,6 @@ $$\text{Attention}(Q, K, V) = \text{softmax}\left(\frac{QK^T}{\sqrt{d_k}}\right)
 
 ## Related Knowledge & Links
 
-- `[[20260810100200-multi-head-attention]]` — Parallelizes scaled dot-product attention across multiple linear projections.
-- `[[transformer-architecture]]` — Incorporates attention within encoder and decoder layers.
-- `[[moc-llm-architectures]]` — Map of Content for transformer components.
+- [[multi-head-attention|Multi-Head Attention]] — Parallelizes scaled dot-product attention across multiple linear projections.
+- [[transformer-architecture]] — Incorporates attention within encoder and decoder layers.
+- [[moc-llm-architectures]] — Map of Content for transformer components.

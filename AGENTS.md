@@ -34,7 +34,7 @@ The knowledge base consists of four distinct layers based on the Zettelkasten me
 ## 2. Formatting & Link Conventions
 
 ### Markdown, Wikilinks & Link Justification
-- Use standard Obsidian-style **wikilinks**: `[[note-title]]` or `[[note-title|Display Title]]`.
+- Use standard Obsidian-style **wikilinks**: [[note-title]] or [[note-title|Display Title]].
 - **Link Rationale**: Always include explicit contextual justification when adding a wikilink:
   *Example:* `[[cross-encoder-reranking]] — applied after vector search to improve precision.`
 - Every atomic note MUST be linked from at least one Map of Content (MOC) in `wiki/syntheses/` or `wiki/index.md`.
