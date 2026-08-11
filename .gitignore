@@ -11,3 +11,5 @@ apps/web/dist/
 *.tsbuildinfo
 *.db
 llm_wiki.egg-info/
+.venv/
+static/

@@ -10,9 +10,15 @@ RUN npm run build
 FROM python:3.12-slim
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends libpq-dev gcc && rm -rf /var/lib/apt/lists/*
+# ffmpeg is required by yt-dlp to extract audio for transcription.
+# psycopg2-binary ships prebuilt wheels, so no gcc/libpq-dev/compiler in the final image.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml ./
+# README.md is referenced by pyproject's `readme` field; without it setuptools warns and
+# ships a wheel with no description.
+COPY pyproject.toml README.md ./
 COPY packages/ packages/
 COPY wiki/ wiki/
 COPY sources/ sources/
@@ -22,9 +28,14 @@ RUN pip install --no-cache-dir .
 COPY --from=web /web/dist /app/static
 
 ENV STATIC_DIR=/app/static
+# Without this the seeder resolves relative to site-packages and imports nothing.
+ENV WIKI_SEED_DIR=/app
 ENV PYTHONUNBUFFERED=1
 ENV PORT=8000
 
+RUN useradd --create-home --uid 10001 appuser && chown -R appuser:appuser /app
+USER appuser
+
 EXPOSE 8000
 
-CMD uvicorn wiki_api.app:app --host 0.0.0.0 --port ${PORT}
+CMD uvicorn wiki_api.app:app --host 0.0.0.0 --port ${PORT} --workers 1

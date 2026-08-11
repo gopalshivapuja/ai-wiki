@@ -1,5 +1,5 @@
 {
   "name": "ai-wiki",
   "user": "ubuntu",
-  "install": "python3 -m pip install --user --break-system-packages -r requirements.txt"
+  "install": "python3 -m pip install --user --break-system-packages -e '.[dev]' && cd apps/web && npm ci"
 }

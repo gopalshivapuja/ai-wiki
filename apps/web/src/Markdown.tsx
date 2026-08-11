@@ -1,38 +1,69 @@
-import React from 'react';
-import { useNavigate } from 'react-router-dom';
+import React, { useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
+import { useNavigate } from 'react-router-dom';
+import rehypeKatex from 'rehype-katex';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
-import rehypeKatex from 'rehype-katex';
+import type { WikiLink } from './api';
 
 interface Props {
   content: string;
+  /** Resolved link targets from the API, used to grey out notes that do not exist yet. */
+  links?: WikiLink[];
 }
 
-export function Markdown({ content }: Props) {
+const WIKI_PREFIX = 'wiki:';
+
+export function Markdown({ content, links }: Props) {
   const navigate = useNavigate();
 
-  const components = {
-    a: ({ href, children }: { href?: string; children?: React.ReactNode }) => {
-      if (href?.startsWith('wiki:')) {
-        const slug = href.replace('wiki:', '');
+  const resolved = useMemo(() => {
+    const map = new Map<string, WikiLink>();
+    for (const l of links || []) map.set(l.target.trim(), l);
+    return map;
+  }, [links]);
+
+  const components = useMemo(
+    () => ({
+      a: ({ href, children }: { href?: string; children?: React.ReactNode }) => {
+        if (!href?.startsWith(WIKI_PREFIX)) {
+          return (
+            <a href={href} target="_blank" rel="noreferrer noopener">
+              {children}
+            </a>
+          );
+        }
+        const target = decodeURIComponent(href.slice(WIKI_PREFIX.length));
+        const link = resolved.get(target);
+        // Unknown targets render as red links rather than navigating to a 404.
+        if (link && !link.exists) {
+          return (
+            <span className="red-link" title="This note does not exist yet">
+              {children}
+            </span>
+          );
+        }
+        const slug = link?.slug || target;
+        const to = `/wiki/${encodeURIComponent(slug)}`;
         return (
           <a
-            href={`/wiki/${slug}`}
+            href={to}
             onClick={(e) => {
+              // Let the browser handle modified clicks so open-in-new-tab keeps working.
+              if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
               e.preventDefault();
-              navigate(`/wiki/${slug}`);
+              navigate(to);
             }}
           >
             {children}
           </a>
         );
-      }
-      return <a href={href} target="_blank" rel="noreferrer">{children}</a>;
-    },
-  };
+      },
+    }),
+    [navigate, resolved],
+  );
 
-  const processed = preprocessWikilinks(content);
+  const processed = useMemo(() => preprocessWikilinks(content), [content]);
 
   return (
     <div className="markdown-body">
@@ -47,12 +78,14 @@ export function Markdown({ content }: Props) {
   );
 }
 
-function preprocessWikilinks(text: string): string {
-  // Remove YAML frontmatter for display
-  const withoutFm = text.replace(/^---\s*\n[\s\S]*?\n---\s*\n/, '');
-  // Convert [[slug|Title]] or [[slug]] to markdown links
-  return withoutFm.replace(
+export function preprocessWikilinks(text: string): string {
+  const withoutFrontmatter = text.replace(/^---\s*\n[\s\S]*?\n---\s*\n/, '');
+  return withoutFrontmatter.replace(
     /\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g,
-    (_, slug, title) => `[${title || slug.replace(/-/g, ' ')}](wiki:${slug.trim()})`
+    (_match, target: string, label: string | undefined) => {
+      const clean = target.trim();
+      const display = label || clean.replace(/-/g, ' ');
+      return `[${display}](${WIKI_PREFIX}${encodeURIComponent(clean)})`;
+    },
   );
 }

@@ -1,43 +1,62 @@
 import { useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { login } from './api';
+import { useAuth } from './auth';
 
 export function LoginPage() {
-  const [email, setEmail] = useState('admin@example.com');
-  const [password, setPassword] = useState('changeme');
-  const [error, setError] = useState('');
-  const [loading, setLoading] = useState(false);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
   const navigate = useNavigate();
+  const location = useLocation();
+  const { refresh } = useAuth();
 
-  async function handleSubmit(e: React.FormEvent) {
+  const from = (location.state as { from?: string } | null)?.from || '/';
+
+  const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setLoading(true);
-    setError('');
+    setBusy(true);
+    setError(null);
     try {
       await login(email, password);
-      navigate('/');
+      refresh();
+      navigate(from, { replace: true });
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Login failed');
+      setError((err as Error).message);
     } finally {
-      setLoading(false);
+      setBusy(false);
     }
-  }
+  };
 
   return (
     <div className="login-card">
-      <h1>🧠 LLM Wiki</h1>
-      <form onSubmit={handleSubmit}>
-        <input type="email" placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} required />
-        <input type="password" placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} required />
-        {error && <p className="error">{error}</p>}
-        <button type="submit" disabled={loading}>{loading ? 'Signing in…' : 'Sign in'}</button>
+      <h1>Log in</h1>
+      <form onSubmit={submit}>
+        <input
+          type="email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          placeholder="you@example.com"
+          autoComplete="username"
+          required
+          autoFocus
+        />
+        <input
+          type="password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          placeholder="Password"
+          autoComplete="current-password"
+          required
+        />
+        <button disabled={busy}>{busy ? 'Signing in…' : 'Log in'}</button>
       </form>
-      <p style={{ marginTop: '1rem', fontSize: '0.85rem', color: 'var(--muted)' }}>
-        Default: admin@example.com / changeme
+      {error && <p className="error">{error}</p>}
+      <p className="muted small" style={{ marginTop: '1rem' }}>
+        Reading is open to everyone. Adding sources, editing notes, and asking the AI need an
+        account. <Link to="/">Browse without logging in →</Link>
       </p>
-      <Link to="/" style={{ display: 'block', marginTop: '1rem', fontSize: '0.9rem' }}>
-        ← Continue without login (read-only)
-      </Link>
     </div>
   );
 }
