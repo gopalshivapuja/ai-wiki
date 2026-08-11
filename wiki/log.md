@@ -15,3 +15,4 @@ Chronological record of ingestion, query, and maintenance passes.
 ## [2026-08-10] query | LLM RAG Query executed: 'What is Scaled Dot-Product Attention?'
 ## [2026-08-10] ai-lint | Executed LLM AI Knowledge Graph Audit
 ## [2026-08-10] maintenance | Full platform build: API, web UI, CLI refactor, slug migration
+## [2026-08-11] query | LLM RAG Query: 'What is scaled dot-product attention?'

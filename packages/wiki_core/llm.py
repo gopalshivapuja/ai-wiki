@@ -24,9 +24,10 @@ def get_openrouter_models() -> list[str]:
             if m_clean and m_clean not in models:
                 models.append(m_clean)
     for m in (
-        "openrouter/free",
-        "google/gemma-3-27b-it:free",
+        "nvidia/nemotron-3-super-120b-a12b:free",
+        "qwen/qwen3-next-80b-a3b-instruct:free",
         "meta-llama/llama-3.3-70b-instruct:free",
+        "openrouter/free",
     ):
         if m not in models:
             models.append(m)
