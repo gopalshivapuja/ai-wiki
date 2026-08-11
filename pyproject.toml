@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "llm-wiki"
-version = "0.2.0"
+version = "0.3.0"
 description = "Web-only LLM Wiki + Zettelkasten on PostgreSQL"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -19,7 +19,11 @@ dependencies = [
     "email-validator>=2.0.0",
     "pyyaml>=6.0",
     "python-dotenv>=1.0.0",
-    "youtube-transcript-api>=0.6.0",
+    "anyio>=4.0.0",
+    # 1.x replaced the get_transcript classmethod with an instance .fetch(); the code uses
+    # the 1.x API, so do not relax this floor.
+    "youtube-transcript-api>=1.0.0",
+    "yt-dlp>=2024.1.0",
     "pypdf>=3.0.0",
     "beautifulsoup4>=4.12.0",
     "html2text>=2024.2.26",
@@ -43,3 +47,16 @@ pythonpath = ["packages"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+ignore = [
+    # FastAPI's whole dependency-injection idiom is a call in a default argument.
+    "B008",
+    # Ingest deliberately catches broad exceptions: a single bad source must not take down
+    # a crawl or a background worker.
+    "BLE001",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501"]

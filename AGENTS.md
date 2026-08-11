@@ -59,31 +59,50 @@ sources:
 
 ## 3. OpenRouter API & LLM Integration
 
-The wiki connects to OpenRouter models configured in `.env`:
-- `OPENROUTER_API_KEY`: Private API key (stored in `.env`, git-ignored).
-- `OPENROUTER_MODEL`: Selected model (e.g. `nvidia/nemotron-4-340b-instruct`, `meta-llama/llama-3.3-70b-instruct:free`, `qwen/qwen-2.5-coder-32b-instruct:free`).
+Configured through the environment (see `.env.example`):
+- `OPENROUTER_API_KEY` — private API key, git-ignored.
+- `OPENROUTER_MODEL` / `OPENROUTER_FALLBACK_MODELS` — **optional**. Leave blank and the app
+  selects a working free model from OpenRouter's live catalogue at
+  `https://openrouter.ai/api/v1/models`. Do not hardcode model ids in documentation: they go
+  stale, and a configured id that OpenRouter no longer serves is skipped with a warning.
+  `GET /api/llm/models` reports what is configured, what is valid, and what will be used.
+- `STT_PROVIDER` + `OPENAI_API_KEY` / `DEEPGRAM_API_KEY` — speech-to-text for videos with no
+  captions.
 
 ---
 
-## 4. CLI Tooling & Workflow Integration
+## 4. Operations — HTTP API
 
-Use `python3 tools/wiki.py` for automated operations:
+There is **no CLI**. This is a web-only application; every operation is an HTTP endpoint, and
+the React frontend is the interface. Authenticate with
+`POST /api/auth/login` and send `Authorization: Bearer <token>`.
 
-- **LLM Grounded RAG Query**: `python3 tools/wiki.py query "<question>"`
-- **LLM AI Source Summarize**: `python3 tools/wiki.py ai-summarize "<PATH_TO_SOURCE>"`
-- **LLM AI Graph Audit**: `python3 tools/wiki.py ai-lint`
-- **New Zettel**: `python3 tools/wiki.py new-zettel "<Concept Title>"`
-- **Hybrid Local Search**: `python3 tools/wiki.py search "<query>"`
-- **ArXiv Paper Ingest**: `python3 tools/wiki.py ingest-arxiv "<arXiv_ID_or_URL>"`
-- **YouTube Ingest**: `python3 tools/wiki.py ingest-youtube "<URL>"`
-- **Web Ingest**: `python3 tools/wiki.py ingest-web "<URL>"`
-- **PDF Ingest**: `python3 tools/wiki.py ingest-pdf "<PATH_TO_PDF>"`
-- **Graph Statistics**: `python3 tools/wiki.py stats`
-- **Auto-Link Scan**: `python3 tools/wiki.py auto-link`
-- **Lint Check**: `python3 tools/wiki.py lint`
-- **Log Event**: `python3 tools/wiki.py log ingest "Processed article X"`
+**Read (public):**
+- `GET /api/search?q=&limit=` — ranked hits; each carries `kind: "page" | "source"`.
+  Anonymous callers get pages only; raw source text requires auth.
+- `GET /api/pages`, `GET /api/pages/{slug}` (includes `backlinks` and resolved `links`),
+  `GET /api/tags`, `GET /api/graph`, `GET /api/stats`, `GET /api/resolve?target=`
+
+**Write (authenticated):**
+- `POST /api/zettels`, `PUT /api/pages/{slug}`, `DELETE /api/pages/{slug}`,
+  `POST /api/pages/{slug}/rename`
+- `GET /api/sources`, `GET /api/sources/{slug}`, `DELETE /api/sources/{slug}`
+- `POST /api/llm/query` — RAG answer with citations
+- `GET /api/log`
+
+**Ingest (authenticated, asynchronous).** Each returns a job; poll `GET /api/jobs/{id}`:
+- `POST /api/jobs/web` · `/arxiv` · `/youtube` · `/transcribe` · `/crawl` · `/paste` ·
+  `/summarize` · `/pdf` (multipart upload)
+- `GET /api/jobs`, `POST /api/jobs/{id}/cancel`, `POST /api/jobs/{id}/retry`
+
+### Content rules for automated writers
+- Sources are immutable. `upsert_source` never mutates an existing row; a different URL that
+  slugifies the same gets a hash-suffixed slug.
+- AI summaries are written to `summary-{source_slug}`, never to the source's own slug, and
+  `upsert_page(..., protect_curated=True)` refuses to overwrite a hand-written note.
 
 ### Template Library (`templates/`)
+Reference for the shape of each note type — the app does not read these at runtime.
 - `templates/template-zettel.md`
 - `templates/template-literature-note.md`
 - `templates/template-moc.md`

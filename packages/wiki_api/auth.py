@@ -41,6 +41,10 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == body.email).first()
     if not user or not verify_password(body.password, user.hashed_password):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+    if not user.is_active:
+        # Checked here too, not only in _require_user — otherwise a deactivated user still
+        # walks away with a valid 7-day token.
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account disabled")
     token = create_access_token(
         {"sub": user.email, "role": user.role},
         timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
@@ -85,4 +89,5 @@ def get_optional_user(
     payload = decode_token(creds.credentials)
     if not payload or "sub" not in payload:
         return None
-    return db.query(User).filter(User.email == payload["sub"]).first()
+    user = db.query(User).filter(User.email == payload["sub"]).first()
+    return user if user and user.is_active else None

@@ -3,59 +3,56 @@
 from __future__ import annotations
 
 from sqlalchemy.orm import Session
+from wiki_core.utils import WIKILINK_RE, parse_wikilinks
 
-from wiki_api.database import Page
-from wiki_api.services.content import resolve_slug
-from wiki_core.utils import parse_wikilinks
+from wiki_api.database import Page, RawSource
+from wiki_api.services.content import build_slug_index
 
 
 def build_graph(db: Session) -> dict:
-    pages = db.query(Page).all()
-    slug_set = {p.slug for p in pages}
-    nodes = []
-    edges = []
-    inbound: dict[str, int] = {p.slug: 0 for p in pages}
+    index = build_slug_index(db)
+    rows = db.query(Page.slug, Page.title, Page.page_type, Page.body).all()
 
-    for p in pages:
-        nodes.append(
-            {
-                "id": p.slug,
-                "slug": p.slug,
-                "title": p.title,
-                "type": p.page_type,
-                "link_count": 0,
-            }
-        )
+    nodes = [
+        {"id": slug, "slug": slug, "title": title, "type": ptype, "link_count": 0}
+        for slug, title, ptype, _ in rows
+    ]
 
-    for p in pages:
-        for link in parse_wikilinks(p.body):
-            target = resolve_slug(db, link.target)
-            if target and target in slug_set and target != p.slug:
-                edges.append({"source": p.slug, "target": target})
-                inbound[target] = inbound.get(target, 0) + 1
+    edges: list[dict] = []
+    seen_edges: set[tuple[str, str]] = set()
+    degree: dict[str, int] = {slug: 0 for slug, _, _, _ in rows}
 
-    out_count: dict[str, int] = {}
-    for e in edges:
-        out_count[e["source"]] = out_count.get(e["source"], 0) + 1
+    for slug, _, _, body in rows:
+        for link in parse_wikilinks(body or ""):
+            target = index.resolve(link.target)
+            if not target or target == slug or target not in degree:
+                continue
+            key = (slug, target)
+            if key in seen_edges:
+                continue
+            seen_edges.add(key)
+            edges.append({"source": slug, "target": target})
+            degree[slug] += 1
+            degree[target] += 1
 
     for n in nodes:
-        n["link_count"] = inbound.get(n["slug"], 0) + out_count.get(n["slug"], 0)
+        n["link_count"] = degree.get(n["slug"], 0)
 
     return {"nodes": nodes, "edges": edges}
 
 
 def stats(db: Session) -> dict:
-    pages = db.query(Page).all()
-    from wiki_core.utils import WIKILINK_RE
-
-    total_links = sum(len(WIKILINK_RE.findall(p.body)) for p in pages)
+    rows = db.query(Page.page_type, Page.body).all()
+    total_links = sum(len(WIKILINK_RE.findall(body or "")) for _, body in rows)
+    types = [ptype for ptype, _ in rows]
     return {
-        "total_pages": len(pages),
-        "zettels": sum(1 for p in pages if p.page_type == "zettel"),
-        "concepts": sum(1 for p in pages if p.page_type == "concept"),
-        "entities": sum(1 for p in pages if p.page_type == "entity"),
-        "literature": sum(1 for p in pages if p.page_type in ("literature", "source")),
-        "mocs": sum(1 for p in pages if p.page_type == "moc"),
+        "total_pages": len(rows),
+        "total_sources": db.query(RawSource).count(),
+        "zettels": types.count("zettel"),
+        "concepts": types.count("concept"),
+        "entities": types.count("entity"),
+        "literature": sum(1 for t in types if t in ("literature", "source")),
+        "mocs": types.count("moc"),
         "total_wikilinks": total_links,
-        "avg_links_per_page": round(total_links / len(pages), 2) if pages else 0,
+        "avg_links_per_page": round(total_links / len(rows), 2) if rows else 0,
     }

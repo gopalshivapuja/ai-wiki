@@ -25,8 +25,13 @@ services:
       ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@example.com}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-changeme}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
-      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-nvidia/nemotron-3-ultra-550b-a55b:free}
-      OPENROUTER_FALLBACK_MODELS: ${OPENROUTER_FALLBACK_MODELS:-nvidia/nemotron-3-super-120b-a12b:free,qwen/qwen3-next-80b-a3b-instruct:free,meta-llama/llama-3.3-70b-instruct:free,openrouter/free}
+      # Blank means "pick a working free model from OpenRouter's live catalogue".
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-}
+      OPENROUTER_FALLBACK_MODELS: ${OPENROUTER_FALLBACK_MODELS:-}
+      STT_PROVIDER: ${STT_PROVIDER:-openai}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      DEEPGRAM_API_KEY: ${DEEPGRAM_API_KEY:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
       db:
         condition: service_healthy

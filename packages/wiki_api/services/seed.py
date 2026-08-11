@@ -2,16 +2,34 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from datetime import date, datetime
 from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from wiki_api.database import Page
+from wiki_api.database import Page, RawSource
 from wiki_api.services.content import import_markdown_file, log_action, upsert_source
 
-BASE = Path(os.environ.get("WIKI_SEED_DIR", Path(__file__).resolve().parents[3]))
+logger = logging.getLogger(__name__)
+
+
+def _default_base() -> Path:
+    """Where the bundled wiki/ and sources/ markdown lives.
+
+    WIKI_SEED_DIR wins and is what the Docker image sets. The parents[3] fallback only
+    resolves correctly for an editable/in-repo install: after a plain `pip install .` the
+    module lives in site-packages and that path points at the Python installation, not the
+    repo — which is why production previously seeded nothing at all, silently.
+    """
+    env = os.environ.get("WIKI_SEED_DIR")
+    if env:
+        return Path(env)
+    return Path(__file__).resolve().parents[3]
+
+
+BASE = _default_base()
 
 
 def _json_safe(obj):
@@ -25,12 +43,27 @@ def _json_safe(obj):
 
 
 def seed_if_empty(db: Session) -> int:
-    if db.query(Page).count() > 0:
+    """Import bundled markdown when the database has no content yet.
+
+    Gated on pages *and* sources both being empty, so a database that somehow has pages but
+    no sources (or the reverse) still gets completed.
+    """
+    if db.query(Page).count() > 0 and db.query(RawSource).count() > 0:
+        return 0
+
+    base = _default_base()
+    wiki = base / "wiki"
+    sources = base / "sources"
+
+    if not wiki.is_dir() and not sources.is_dir():
+        logger.error(
+            "Seed data not found under %s (wiki/ and sources/ are both missing). "
+            "The wiki will start empty. Set WIKI_SEED_DIR to the directory containing them.",
+            base,
+        )
         return 0
 
     count = 0
-    wiki = BASE / "wiki"
-    sources = BASE / "sources"
 
     type_map = {
         "atomic": "zettel",
@@ -40,24 +73,25 @@ def seed_if_empty(db: Session) -> int:
         "syntheses": None,
     }
 
-    if wiki.exists():
+    if wiki.is_dir():
         for sub, ptype in type_map.items():
             d = wiki / sub
-            if not d.exists():
+            if not d.is_dir():
                 continue
-            for md in d.glob("*.md"):
+            for md in sorted(d.glob("*.md")):
                 actual_type = ptype
                 if sub == "syntheses":
                     actual_type = "moc" if md.stem.startswith("moc-") else "synthesis"
-                import_markdown_file(db, str(md), page_type=actual_type)
-                count += 1
+                if import_markdown_file(db, str(md), page_type=actual_type):
+                    count += 1
 
         index = wiki / "index.md"
-        if index.exists():
-            import_markdown_file(db, str(index), page_type="index")
+        if index.is_file() and import_markdown_file(db, str(index), page_type="index"):
+            count += 1
 
-    if sources.exists():
-        for md in sources.rglob("*.md"):
+    source_count = 0
+    if sources.is_dir():
+        for md in sorted(sources.rglob("*.md")):
             if md.parent.name == "assets":
                 continue
             text = md.read_text(encoding="utf-8")
@@ -72,9 +106,16 @@ def seed_if_empty(db: Session) -> int:
                 body=body.strip(),
                 source_type=str(fm.get("type", md.parent.name)),
                 url=fm.get("url"),
-                extra=_json_safe({k: v for k, v in fm.items() if k not in ("title", "type", "url")}),
+                extra=_json_safe(
+                    {k: v for k, v in fm.items() if k not in ("title", "type", "url")}
+                ),
             )
+            source_count += 1
 
-    if count:
-        log_action(db, "seed", f"Imported {count} wiki pages from seed data")
-    return count
+    total = count + source_count
+    if total:
+        log_action(db, "seed", f"Imported {count} wiki pages and {source_count} sources")
+        logger.info("Seeded %d pages and %d sources from %s", count, source_count, base)
+    else:
+        logger.warning("Seed directory %s contained no markdown files", base)
+    return total
