@@ -3,6 +3,7 @@ import { AskPage } from './AskPage';
 import { GraphPage } from './GraphPage';
 import { HomePage } from './HomePage';
 import { LoginPage } from './LoginPage';
+import { ManagePage } from './ManagePage';
 import { PageView } from './PageView';
 import './index.css';
 
@@ -13,6 +14,7 @@ function Nav() {
       <Link to="/" className="logo">🧠 LLM Wiki</Link>
       <Link to="/graph">Graph</Link>
       <Link to="/ask">Ask AI</Link>
+      <Link to="/manage">Add</Link>
       <div className="spacer" />
       {token ? (
         <button className="ghost" onClick={() => { localStorage.removeItem('wiki_token'); window.location.href = '/'; }}>
@@ -34,6 +36,7 @@ export default function App() {
         <Route path="/wiki/:slug" element={<PageView />} />
         <Route path="/graph" element={<GraphPage />} />
         <Route path="/ask" element={<AskPage />} />
+        <Route path="/manage" element={<ManagePage />} />
         <Route path="/login" element={<LoginPage />} />
       </Routes>
     </BrowserRouter>

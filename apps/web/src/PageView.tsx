@@ -19,8 +19,8 @@ export function PageView() {
   if (error) return <div className="container"><p className="error">{error}</p></div>;
   if (!page) return <div className="container"><p style={{ color: 'var(--muted)' }}>Loading…</p></div>;
 
-  const tags = (page.frontmatter.tags as string[]) || [];
-  const fmType = String(page.frontmatter.type || 'page');
+  const tags = page.tags || [];
+  const fmType = page.type || 'page';
 
   return (
     <div className="container">
@@ -38,7 +38,7 @@ export function PageView() {
               <span key={t} className="badge">{t}</span>
             ))}
           </p>
-          <Markdown content={page.content} />
+          <Markdown content={page.body} />
         </article>
 
         <aside className="sidebar">
@@ -59,8 +59,8 @@ export function PageView() {
               ))}
             </ul>
           )}
-          <h3 style={{ marginTop: '1.5rem' }}>Path</h3>
-          <p style={{ fontSize: '0.8rem', color: 'var(--muted)', wordBreak: 'break-all' }}>{page.path}</p>
+          <h3 style={{ marginTop: '1.5rem' }}>Type</h3>
+          <p style={{ fontSize: '0.8rem', color: 'var(--muted)' }}>{fmType}</p>
         </aside>
       </div>
     </div>

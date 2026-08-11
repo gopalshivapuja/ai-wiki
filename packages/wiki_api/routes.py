@@ -1,37 +1,26 @@
-"""Wiki API routes."""
+"""API routes — all data from PostgreSQL."""
 
 from __future__ import annotations
 
-import os
-
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
+from sqlalchemy.orm import Session
 
 from wiki_api.auth import get_current_user, get_optional_user
-from wiki_api.database import User
-from wiki_core.config import BASE_DIR, load_dotenv
-from wiki_core.frontmatter import extract_title, parse_frontmatter
-from wiki_core.graph import build_graph, get_backlinks, get_page_by_slug
-from wiki_core.ingest import ingest_arxiv, ingest_web, ingest_youtube
-from wiki_core.lint import auto_link_suggestions, graph_stats, lint_wiki
-from wiki_core.log import append_log
-from wiki_core.rag import ai_lint_wiki, ai_summarize_source, query_wiki
-from wiki_core.search import search
-from wiki_core.zettel import new_zettel
+from wiki_api.database import ActivityLog, Page, RawSource, User, get_db
+from wiki_api.services.content import (
+    create_zettel,
+    get_backlinks,
+    get_page,
+    list_pages,
+    log_action,
+    page_to_dict,
+)
+from wiki_api.services.graph import build_graph, stats
+from wiki_api.services.ingest import ai_query, ai_summarize, ingest_arxiv, ingest_web, ingest_youtube
+from wiki_api.services.search import search
 
-load_dotenv()
 router = APIRouter()
-
-REQUIRE_AUTH = os.environ.get("REQUIRE_AUTH", "false").lower() == "true"
-
-
-def _auth_dep(user: User | None = Depends(get_optional_user)):
-    if REQUIRE_AUTH and user is None:
-        raise HTTPException(status_code=401, detail="Authentication required")
-
-
-def _write_auth(user: User = Depends(get_current_user)):
-    return user
 
 
 class QueryBody(BaseModel):
@@ -55,151 +44,111 @@ class IngestArxivBody(BaseModel):
 
 
 class SummarizeBody(BaseModel):
-    source_path: str
-
-
-class LogBody(BaseModel):
-    action: str
-    summary: str
+    source_slug: str
 
 
 @router.get("/search")
-def api_search(q: str = Query(...), limit: int = 10, _: None = Depends(_auth_dep)):
-    results = search(q, top_k=limit)
-    return {
-        "results": [
-            {
-                "score": r.score,
-                "slug": r.slug,
-                "title": r.title,
-                "path": r.path,
-                "snippet": r.snippet,
-                "type": r.page_type,
-            }
-            for r in results
-        ]
-    }
+def api_search(q: str = Query(...), limit: int = Query(12), db: Session = Depends(get_db)):
+    return {"results": search(db, q, top_k=limit)}
 
 
 @router.get("/pages")
-def list_pages(_: None = Depends(_auth_dep)):
-    graph = build_graph()
+def api_pages(db: Session = Depends(get_db)):
+    pages = list_pages(db)
     return {
         "pages": [
-            {"slug": n.slug, "title": n.title, "type": n.type, "path": n.path, "link_count": n.link_count}
-            for n in graph.nodes
+            {"slug": p.slug, "title": p.title, "type": p.page_type, "tags": p.tags or []}
+            for p in pages
         ]
     }
 
 
 @router.get("/pages/{slug}")
-def get_page(slug: str, _: None = Depends(_auth_dep)):
-    path = get_page_by_slug(slug)
-    if not path:
-        raise HTTPException(status_code=404, detail="Page not found")
-    text = path.read_text(encoding="utf-8")
-    fm, body = parse_frontmatter(text)
+def api_page(slug: str, db: Session = Depends(get_db)):
+    p = get_page(db, slug)
+    if not p:
+        raise HTTPException(404, "Page not found")
+    d = page_to_dict(p)
+    d["backlinks"] = get_backlinks(db, slug)
+    return d
+
+
+@router.get("/sources")
+def api_sources(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    sources = db.query(RawSource).order_by(RawSource.created_at.desc()).all()
     return {
-        "slug": slug,
-        "title": extract_title(text, slug),
-        "content": text,
-        "body": body,
-        "frontmatter": fm,
-        "path": str(path.relative_to(BASE_DIR)),
-        "backlinks": get_backlinks(slug),
+        "sources": [
+            {"slug": s.slug, "title": s.title, "type": s.source_type, "url": s.url}
+            for s in sources
+        ]
     }
 
 
 @router.get("/graph")
-def api_graph(_: None = Depends(_auth_dep)):
-    g = build_graph()
-    return {
-        "nodes": [n.__dict__ for n in g.nodes],
-        "edges": [e.__dict__ for e in g.edges],
-    }
+def api_graph(db: Session = Depends(get_db)):
+    return build_graph(db)
 
 
 @router.get("/stats")
-def api_stats(_: None = Depends(_auth_dep)):
-    return graph_stats()
+def api_stats(db: Session = Depends(get_db)):
+    return stats(db)
 
 
-@router.get("/lint")
-def api_lint(_: None = Depends(_auth_dep)):
-    issues = lint_wiki()
+@router.get("/log")
+def api_log(db: Session = Depends(get_db), user: User = Depends(get_current_user), limit: int = 50):
+    entries = db.query(ActivityLog).order_by(ActivityLog.created_at.desc()).limit(limit).all()
     return {
-        "issues": [{"kind": i.kind, "message": i.message, "path": i.path} for i in issues],
-        "count": len(issues),
+        "entries": [
+            {"action": e.action, "summary": e.summary, "created_at": e.created_at.isoformat()}
+            for e in entries
+        ]
     }
 
 
-@router.get("/auto-link")
-def api_auto_link(_: None = Depends(_auth_dep)):
-    return {"suggestions": [{"path": p, "term": t, "slug": s} for p, t, s in auto_link_suggestions()]}
-
-
 @router.post("/llm/query")
-def api_query(body: QueryBody, user: User = Depends(get_current_user)):
+def api_query(body: QueryBody, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     try:
-        answer = query_wiki(body.question, verbose=False)
-        return {"answer": answer}
+        return {"answer": ai_query(db, body.question)}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(500, str(e))
 
 
 @router.post("/llm/summarize")
-def api_summarize(body: SummarizeBody, user: User = Depends(get_current_user)):
-    path = str((BASE_DIR / body.source_path).resolve())
+def api_summarize(body: SummarizeBody, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     try:
-        out = ai_summarize_source(path)
-        return {"path": out}
+        return ai_summarize(db, body.source_slug)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/llm/audit")
-def api_audit(user: User = Depends(get_current_user)):
-    try:
-        report = ai_lint_wiki(verbose=False)
-        return {"report": report}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(500, str(e))
 
 
 @router.post("/zettels")
-def api_new_zettel(body: ZettelBody, user: User = Depends(get_current_user)):
+def api_zettel(body: ZettelBody, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     try:
-        slug = new_zettel(body.title)
-        return {"slug": slug}
-    except FileExistsError as e:
-        raise HTTPException(status_code=409, detail=str(e))
+        p = create_zettel(db, body.title)
+        return {"slug": p.slug, "title": p.title}
+    except ValueError as e:
+        raise HTTPException(409, str(e))
 
 
 @router.post("/ingest/web")
-def api_ingest_web(body: IngestWebBody, user: User = Depends(get_current_user)):
+def api_ingest_web(body: IngestWebBody, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     try:
-        return {"path": ingest_web(body.url)}
+        return ingest_web(db, body.url)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(500, str(e))
 
 
 @router.post("/ingest/youtube")
-def api_ingest_youtube(body: IngestYoutubeBody, user: User = Depends(get_current_user)):
+def api_ingest_youtube(body: IngestYoutubeBody, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     try:
-        return {"path": ingest_youtube(body.url)}
+        return ingest_youtube(db, body.url)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(500, str(e))
 
 
 @router.post("/ingest/arxiv")
-def api_ingest_arxiv(body: IngestArxivBody, user: User = Depends(get_current_user)):
+def api_ingest_arxiv(body: IngestArxivBody, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     try:
-        return {"path": ingest_arxiv(body.id_or_url)}
+        return ingest_arxiv(db, body.id_or_url)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/log")
-def api_log(body: LogBody, user: User = Depends(get_current_user)):
-    line = append_log(body.action, body.summary)
-    return {"line": line}
+        raise HTTPException(500, str(e))

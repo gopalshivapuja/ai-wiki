@@ -9,6 +9,21 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: wiki
+          POSTGRES_PASSWORD: wiki
+          POSTGRES_DB: wiki
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - uses: actions/checkout@v4
 
@@ -16,31 +31,30 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install dependencies
-        run: |
-          pip install -e ".[api,dev]"
-          pip install -r requirements.txt
-
-      - name: Wiki lint
-        run: python -m wiki_cli.main lint
-
-      - name: Run tests
-        run: pytest tests/ -v
-
-      - name: Ruff check
-        run: ruff check packages/ tests/
-
-  web:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
 
-      - name: Build web
+      - name: Install Python deps
+        run: pip install -e ".[dev]"
+
+      - name: Build frontend
         working-directory: apps/web
-        run: |
-          npm install
-          npm run build
+        run: npm ci && npm run build
+
+      - name: Copy static for tests
+        run: cp -r apps/web/dist static
+
+      - name: Run tests
+        env:
+          DATABASE_URL: sqlite:////tmp/wiki_ci.db
+          JWT_SECRET: test-secret
+        run: pytest tests/ -v
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t llm-wiki:test .

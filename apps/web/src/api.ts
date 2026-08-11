@@ -1,25 +1,21 @@
-const API_BASE = import.meta.env.VITE_API_URL || '';
+const API = '/api';
 
-function authHeaders(): HeadersInit {
+function headers(): HeadersInit {
   const token = localStorage.getItem('wiki_token');
   const h: HeadersInit = { 'Content-Type': 'application/json' };
   if (token) h['Authorization'] = `Bearer ${token}`;
   return h;
 }
 
-export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    ...options,
-    headers: { ...authHeaders(), ...options.headers },
-  });
+async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const res = await fetch(`${API}${path}`, { ...options, headers: { ...headers(), ...options.headers } });
   if (res.status === 401) {
     localStorage.removeItem('wiki_token');
-    window.location.href = '/login';
-    throw new Error('Unauthorized');
+    throw new Error('Login required');
   }
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(err.detail || res.statusText);
+    throw new Error(typeof err.detail === 'string' ? err.detail : res.statusText);
   }
   return res.json();
 }
@@ -28,7 +24,6 @@ export interface SearchResult {
   score: number;
   slug: string;
   title: string;
-  path: string;
   snippet: string;
   type: string;
 }
@@ -36,11 +31,11 @@ export interface SearchResult {
 export interface PageData {
   slug: string;
   title: string;
-  content: string;
   body: string;
-  frontmatter: Record<string, unknown>;
-  path: string;
-  backlinks: { slug: string; title: string; path: string }[];
+  content: string;
+  type: string;
+  tags: string[];
+  backlinks: { slug: string; title: string; type: string }[];
 }
 
 export interface GraphData {
@@ -48,34 +43,42 @@ export interface GraphData {
   edges: { source: string; target: string }[];
 }
 
-export async function login(email: string, password: string) {
-  const data = await api<{ access_token: string }>('/api/auth/login', {
+export const searchWiki = (q: string, limit = 12) =>
+  api<{ results: SearchResult[] }>(`/search?q=${encodeURIComponent(q)}&limit=${limit}`);
+
+export const getPage = (slug: string) => api<PageData>(`/pages/${encodeURIComponent(slug)}`);
+
+export const getGraph = () => api<GraphData>('/graph');
+
+export const getStats = () => api<Record<string, number>>('/stats');
+
+export const getSources = () => api<{ sources: { slug: string; title: string; type: string; url?: string }[] }>('/sources');
+
+export const getLog = () => api<{ entries: { action: string; summary: string; created_at: string }[] }>('/log');
+
+export const login = async (email: string, password: string) => {
+  const data = await api<{ access_token: string }>('/auth/login', {
     method: 'POST',
     body: JSON.stringify({ email, password }),
   });
   localStorage.setItem('wiki_token', data.access_token);
   return data;
-}
+};
 
-export async function searchWiki(q: string, limit = 12) {
-  return api<{ results: SearchResult[] }>(`/api/search?q=${encodeURIComponent(q)}&limit=${limit}`);
-}
+export const queryLLM = (question: string) =>
+  api<{ answer: string }>('/llm/query', { method: 'POST', body: JSON.stringify({ question }) });
 
-export async function getPage(slug: string) {
-  return api<PageData>(`/api/pages/${encodeURIComponent(slug)}`);
-}
+export const ingestWeb = (url: string) =>
+  api<{ slug: string; title: string }>('/ingest/web', { method: 'POST', body: JSON.stringify({ url }) });
 
-export async function getGraph() {
-  return api<GraphData>('/api/graph');
-}
+export const ingestArxiv = (id_or_url: string) =>
+  api<{ slug: string; title: string }>('/ingest/arxiv', { method: 'POST', body: JSON.stringify({ id_or_url }) });
 
-export async function queryLLM(question: string) {
-  return api<{ answer: string }>('/api/llm/query', {
-    method: 'POST',
-    body: JSON.stringify({ question }),
-  });
-}
+export const ingestYoutube = (url: string) =>
+  api<{ slug: string; title: string }>('/ingest/youtube', { method: 'POST', body: JSON.stringify({ url }) });
 
-export async function getMe() {
-  return api<{ email: string; role: string }>('/api/auth/me');
-}
+export const summarizeSource = (source_slug: string) =>
+  api<{ slug: string; title: string }>('/llm/summarize', { method: 'POST', body: JSON.stringify({ source_slug }) });
+
+export const newZettel = (title: string) =>
+  api<{ slug: string; title: string }>('/zettels', { method: 'POST', body: JSON.stringify({ title }) });

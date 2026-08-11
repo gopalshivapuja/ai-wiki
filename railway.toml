@@ -2,7 +2,7 @@ name = "llm-wiki"
 
 [build]
 builder = "DOCKERFILE"
-dockerfilePath = "docker/Dockerfile.api"
+dockerfilePath = "Dockerfile"
 
 [deploy]
 healthcheckPath = "/health"

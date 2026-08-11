@@ -50,10 +50,10 @@ export function HomePage() {
       {results.length > 0 && (
         <div className="results">
           {results.map((r) => (
-            <div key={r.slug + r.path} className="result-item" onClick={() => navigate(`/wiki/${r.slug}`)}>
+            <div key={r.slug} className="result-item" onClick={() => navigate(`/wiki/${r.slug}`)}>
               <div className="result-meta">
                 <span className="badge">{r.type}</span>
-                {r.path}
+                score {r.score.toFixed(2)}
               </div>
               <div className="result-title">{r.title}</div>
               {r.snippet && <div className="result-snippet">{r.snippet}</div>}
@@ -62,10 +62,11 @@ export function HomePage() {
         </div>
       )}
 
-      {!query && (
+        {!query && (
         <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap', justifyContent: 'center' }}>
           <Link to="/graph">Explore Graph →</Link>
           <Link to="/ask">Ask AI →</Link>
+          <Link to="/manage">Add Sources →</Link>
         </div>
       )}
     </div>

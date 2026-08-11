@@ -1,102 +1,47 @@
-# LLM Wiki + Zettelkasten Platform
+# LLM Wiki
 
-Personal AI knowledge base based on [Andrej Karpathy's LLM Wiki pattern](llm-wiki.md), with Zettelkasten architecture, web UI, CLI, and OpenRouter LLM integration.
+Web-only personal knowledge base (Karpathy LLM Wiki + Zettelkasten). All content lives in **PostgreSQL** — no files, no sync, no CLI.
 
-## Quick Start
+## Features
 
-### 1. Install
+- Google-style search across your knowledge base
+- Markdown reader with wikilinks and backlinks
+- Interactive knowledge graph
+- Ask AI (RAG with Nemotron via OpenRouter)
+- Ingest web articles, arXiv papers, YouTube transcripts
+- Create atomic zettels and AI literature summaries
 
-```bash
-pip install -e ".[api,dev]"
-pip install -r requirements.txt
-cd apps/web && npm install && cd ../..
-```
-
-### 2. Configure
-
-```bash
-cp .env.example .env
-# Add OPENROUTER_API_KEY for AI features
-```
-
-### 3. Run locally
-
-**API** (terminal 1):
-```bash
-uvicorn wiki_api.app:app --reload --port 8000
-```
-
-**Web** (terminal 2):
-```bash
-cd apps/web && npm run dev
-```
-
-Open http://localhost:5173 — Google-style search over your wiki.
-
-**CLI**:
-```bash
-wiki search "attention"
-wiki read transformer-architecture
-wiki query "What is LoRA?"
-wiki stats
-wiki lint
-```
-
-### 4. Docker
+## Run locally with Docker
 
 ```bash
-docker compose -f docker-compose.yml up --build
+cp .env.example .env   # add OPENROUTER_API_KEY
+docker compose up --build
 ```
 
-- Web: http://localhost:3000
-- API: http://localhost:8000
-- Health: http://localhost:8000/health
+Open **http://localhost:8000**
 
-## Default Login
+Login: `admin@example.com` / `changeme`
+
+## Deploy to Railway
+
+1. Create project at [railway.app](https://railway.app)
+2. Add **PostgreSQL** plugin
+3. Deploy from GitHub — uses `Dockerfile` at repo root
+4. Set environment variables (see `DEPLOY.md`)
+5. Generate a public domain
+
+That's it — one service, one database, no sync.
+
+## Default credentials
+
+Change `ADMIN_PASSWORD` in production!
 
 - Email: `admin@example.com`
-- Password: `changeme` (set `ADMIN_PASSWORD` in `.env`)
+- Password: `changeme`
 
-Read-only browsing works without login. AI features (Ask, ingest, new zettel) require login.
+## Tech stack
 
-## CLI Remote Mode
-
-```bash
-wiki login --api-url http://localhost:8000
-wiki search "transformer" --json
-```
-
-## Project Structure
-
-```
-wiki/           # Knowledge base (Zettelkasten layers)
-sources/        # Immutable raw sources
-packages/
-  wiki_core/    # Shared library (search, graph, ingest, RAG)
-  wiki_api/     # FastAPI backend
-  wiki_cli/     # Typer CLI
-apps/web/       # React + Vite frontend
-docker/         # Dockerfiles
-```
-
-## Railway Deployment
-
-1. Create a Railway project
-2. Add **PostgreSQL** plugin
-3. Deploy API service from `docker/Dockerfile.api`
-4. Deploy Web service from `docker/Dockerfile.web`
-5. Set environment variables:
-
-```
-JWT_SECRET=<random-secret>
-ADMIN_EMAIL=you@example.com
-ADMIN_PASSWORD=<strong-password>
-OPENROUTER_API_KEY=sk-or-v1-...
-DATABASE_URL=<from Railway Postgres>
-ALLOWED_ORIGINS=https://your-web.up.railway.app
-REQUIRE_AUTH=true
-```
-
-## Schema
-
-See [AGENTS.md](AGENTS.md) for Zettelkasten conventions and agent workflows.
+- **Frontend**: React + Vite (served by FastAPI)
+- **Backend**: FastAPI + SQLAlchemy
+- **Database**: PostgreSQL
+- **LLM**: OpenRouter (Nemotron 3 Ultra + fallbacks)
