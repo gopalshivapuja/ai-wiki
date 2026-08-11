@@ -96,6 +96,13 @@ def handle_crawl(db: Session, params: dict, ctx: JobContext) -> dict:
 
 def handle_pdf(db: Session, params: dict, ctx: JobContext) -> dict:
     path = Path(params["upload_path"])
+    if not path.is_file():
+        # The upload is staged on the container's ephemeral disk while only its path lives in
+        # the job row, so a job still queued when the container is replaced loses its file.
+        raise ValueError(
+            f"The uploaded file for '{params.get('filename', 'this PDF')}' is no longer "
+            "available — the server restarted before the job ran. Please upload it again."
+        )
     try:
         ctx.progress(0, 1, "Extracting text")
         result = documents.ingest_pdf(db, path, params.get("title"), params.get("filename"))

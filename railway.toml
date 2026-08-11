@@ -1,4 +1,9 @@
-name = "llm-wiki"
+# Railway's config schema has exactly three top-level sections: build, deploy and
+# environments. Anything else (a top-level `name`, a `[service]` section, `internal_port`)
+# is silently ignored — it looks like configuration but does nothing.
+#
+# The listening port is NOT set here. Railway's proxy targets the Dockerfile's EXPOSE 8000
+# and the PORT variable it sets; both agree at 8000.
 
 [build]
 builder = "DOCKERFILE"
@@ -6,8 +11,9 @@ dockerfilePath = "Dockerfile"
 
 [deploy]
 healthcheckPath = "/health"
-healthcheckTimeout = 120
+# /health does not touch the database, so this only needs to cover process start. Left at
+# Railway's default rather than tightened: the first boot against a brand-new database also
+# waits for it to accept connections (see wiki_api/startup.py).
+healthcheckTimeout = 300
 restartPolicyType = "ON_FAILURE"
-
-[service]
-internal_port = 8000
+restartPolicyMaxRetries = 10

@@ -48,6 +48,12 @@ async def lifespan(app: FastAPI):
     from wiki_api.jobs.runner import JobRunner
     from wiki_api.schema_ddl import apply_schema_ddl
     from wiki_api.services.seed import seed_if_empty
+    from wiki_api.startup import check_secrets, wait_for_database
+
+    check_secrets()
+    # The app container and the database service usually start together, so the first
+    # connect attempt often lands before the database is listening.
+    wait_for_database()
 
     # Order matters: create_all() must make the tables before apply_schema_ddl() adds columns
     # and indexes to them, and both must precede any read of seeded content.

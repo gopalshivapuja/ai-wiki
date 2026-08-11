@@ -404,3 +404,61 @@ def test_page_title_decodes_entities_and_strips_site_suffix():
     )
     assert title == "4. More Control Flow Tools"
     assert "8212" not in slugify(title)
+
+
+# --- startup guards -----------------------------------------------------------
+
+
+def test_is_production_detection(monkeypatch):
+    from wiki_api.startup import is_production
+
+    for url, expected in [
+        ("sqlite:////tmp/x.db", False),
+        ("postgresql://wiki:wiki@localhost:5432/wiki", False),
+        ("postgresql://wiki:wiki@db:5432/wiki", False),  # docker compose
+        ("postgresql://u:p@containers-us-west-1.railway.app:6543/railway", True),
+        ("", False),
+    ]:
+        monkeypatch.setenv("DATABASE_URL", url)
+        assert is_production() is expected, url
+
+
+def test_default_jwt_secret_blocks_production_boot(monkeypatch):
+    """The default secret is published in this repo — booting with it means forgeable tokens."""
+    from wiki_api.startup import StartupError, check_secrets
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@monorail.proxy.rlwy.net:6543/railway")
+    monkeypatch.delenv("JWT_SECRET", raising=False)
+    with pytest.raises(StartupError, match="JWT_SECRET"):
+        check_secrets()
+
+    monkeypatch.setenv("JWT_SECRET", "a-real-secret")
+    check_secrets()  # must not raise
+
+
+def test_default_secret_is_allowed_in_local_development(monkeypatch):
+    from wiki_api.startup import check_secrets
+
+    monkeypatch.setenv("DATABASE_URL", "sqlite:////tmp/dev.db")
+    monkeypatch.delenv("JWT_SECRET", raising=False)
+    monkeypatch.delenv("ADMIN_PASSWORD", raising=False)
+    check_secrets()  # warns, does not raise
+
+
+def test_wait_for_database_retries_then_gives_up(monkeypatch):
+    """A database that never comes up must fail with a clear message, not a raw driver error."""
+    import wiki_api.startup as startup
+    from sqlalchemy import create_engine
+
+    monkeypatch.setattr(startup.time, "sleep", lambda _s: None)
+    dead = create_engine("postgresql://nobody@127.0.0.1:1/none", connect_args={"connect_timeout": 1})
+    monkeypatch.setattr("wiki_api.database.engine", dead)
+
+    with pytest.raises(startup.StartupError, match="Could not reach the database"):
+        startup.wait_for_database(attempts=2)
+
+
+def test_wait_for_database_succeeds_on_live_engine():
+    from wiki_api.startup import wait_for_database
+
+    wait_for_database(attempts=1)  # the test engine is live

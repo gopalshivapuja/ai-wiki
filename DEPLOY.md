@@ -66,16 +66,20 @@ $20/vCPU/month, volume $0.15/GB/month, egress $0.05/GB. The Hobby plan is $5/mon
 *including* $5 of usage, so you pay `max($5, actual usage)`. PostgreSQL is billed as an
 ordinary service at the same rates, not as a priced add-on.
 
-| | App | Postgres | Volume + egress | **Total** |
+The **app service declares no volume and does not need one** — seed data is read-only inside
+the image and the only writes are short-lived files in `/tmp` (PDF uploads, downloaded
+audio), which use ephemeral container disk. Only the Postgres service has a volume.
+
+| | App (RAM/CPU) | Postgres (RAM/CPU) | PG volume + egress | **Total** |
 |---|---|---|---|---|
-| Low | 0.30 GB / 0.02 vCPU | 0.20 GB / 0.01 vCPU | 1 GB | **~$6/mo** |
+| Low | 0.30 GB / 0.02 vCPU | 0.20 GB / 0.01 vCPU | 1 GB | **~$5.80/mo** |
 | Typical | 0.45 GB / 0.03 vCPU | 0.50 GB / 0.02 vCPU | 3 GB | **~$11/mo** |
-| High | 0.60 GB / 0.08 vCPU | 1.0 GB / 0.05 vCPU | 5 GB | **~$20/mo** |
+| High | 0.60 GB / 0.08 vCPU | 1.0 GB / 0.05 vCPU | 5 GB | **~$19.60/mo** |
 
 **RAM is about 85% of the bill.** The image already runs `uvicorn --workers 1` and a small
-connection pool to keep it near the low end. Hobby's 5 GB volume cap fits this workload;
-going past it forces the Pro plan at $20/month. CPU and egress are noise at a few hundred
-requests per day.
+connection pool to keep it near the low end. Hobby's 5 GB volume cap applies to the Postgres
+volume; going past it forces the Pro plan at $20/month. CPU and egress are noise at a few
+hundred requests per day.
 
 **OpenRouter** — `:free` models genuinely cost $0/token but allow only 20 requests/minute
 and **50 requests/day**. A one-time **$10 credit purchase raises that permanently to 1,000
@@ -91,8 +95,33 @@ and would roughly double the Railway bill, which is why this uses an external AP
 
 ## First run
 
-On first boot the app imports the bundled `wiki/` and `sources/` markdown into PostgreSQL,
-once. After that the database is the only source of truth and those files are ignored.
+On first boot the app waits for the database to accept connections (retrying with backoff —
+the app and database services usually start together), refuses to start if `JWT_SECRET` is
+still the built-in default, then imports the bundled `wiki/` and `sources/` markdown into
+PostgreSQL once. After that the database is the only source of truth and those files are
+ignored.
+
+A healthy first boot logs, in order:
+
+```
+Database reachable after N attempts     (only when it had to wait)
+Created admin user <your email>
+schema_ddl: applied 8/8 statements
+Seeded 20 pages and 2 sources from /app
+Job runner started with 2 worker(s)
+```
+
+## Known limitations on Railway
+
+**YouTube audio transcription usually fails from Railway.** yt-dlp requests from datacenter
+IPs are frequently met with "Sign in to confirm you're not a bot" or HTTP 403, even though
+the same URL works from your laptop. YouTube ingest *via captions* is unaffected, as is
+transcription of audio hosted elsewhere. There is no proxy or cookie configuration for this.
+
+**Queued PDF jobs do not survive a redeploy.** The upload is staged in `/tmp` and only its
+path is stored in the job row, so a PDF still queued when the container is replaced fails
+with a missing-file error. Re-upload it. Every other job kind retries cleanly, because
+already-stored sources are skipped.
 
 ## Local test before deploying
 
