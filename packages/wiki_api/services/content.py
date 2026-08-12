@@ -1,8 +1,7 @@
-"""Page and content operations."""
+"""Document reads, writes, and link resolution."""
 
 from __future__ import annotations
 
-import hashlib
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,11 +9,14 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 from wiki_core.utils import parse_frontmatter, parse_wikilinks, slugify
 
-from wiki_api.database import ActivityLog, Page, RawSource, utcnow
+from wiki_api.database import NOTE, SOURCE, ActivityLog, Document, Revision, utcnow
 
-# Page types that hold user-authored content and must never be silently overwritten by an
-# automated writer (ingest, AI summarize, crawl).
-CURATED_TYPES = {"zettel", "concept", "entity", "moc", "synthesis", "index", "page"}
+# Ingested sources are slugged under this prefix so they share one namespace with notes
+# without colliding. Replaces the old two-table split and its disambiguation machinery.
+SOURCE_PREFIX = "src-"
+SOURCE_SUBTYPE_SET = ("web", "pdf", "youtube", "audio", "arxiv", "note")
+
+MAX_SLUG_LEN = 80
 
 
 def log_action(db: Session, action: str, summary: str) -> None:
@@ -22,58 +24,135 @@ def log_action(db: Session, action: str, summary: str) -> None:
     db.commit()
 
 
-def page_to_dict(p: Page, include_body: bool = True) -> dict:
-    d = {
-        "slug": p.slug,
-        "uid": p.uid,
-        "title": p.title,
-        "type": p.page_type,
-        "tags": p.tags or [],
-        "source_refs": p.source_refs or [],
-        "created_at": p.created_at.isoformat() if p.created_at else None,
-        "updated_at": p.updated_at.isoformat() if p.updated_at else None,
+def new_uid() -> str:
+    return utcnow().strftime("%Y%m%d%H%M%S")
+
+
+def note_slug(title: str) -> str:
+    return slugify(title)[:MAX_SLUG_LEN]
+
+
+def source_slug(title: str, fallback: str = "") -> str:
+    base = slugify(title) or slugify(fallback) or "untitled"
+    return f"{SOURCE_PREFIX}{base}"[:MAX_SLUG_LEN]
+
+
+# --- serialisation ------------------------------------------------------------
+
+
+def to_dict(d: Document, include_body: bool = True) -> dict:
+    out = {
+        "slug": d.slug,
+        "uid": d.uid,
+        "title": d.title,
+        "doc_class": d.doc_class,
+        "type": d.subtype,
+        "tags": d.tags or [],
+        "url": d.url,
+        "collection": d.collection,
+        "immutable": bool(d.immutable),
+        "created_at": d.created_at.isoformat() if d.created_at else None,
+        "updated_at": d.updated_at.isoformat() if d.updated_at else None,
     }
     if include_body:
-        d["body"] = p.body
-    return d
+        out["body"] = d.body
+    return out
 
 
-def source_to_dict(s: RawSource, include_body: bool = True) -> dict:
-    d = {
-        "slug": s.slug,
-        "title": s.title,
-        "type": s.source_type,
-        "url": s.url,
-        "collection": s.collection,
-        "extra": s.extra or {},
-        "created_at": s.created_at.isoformat() if s.created_at else None,
+def row_to_dict(r) -> dict:
+    """Serialise a projected row from list_docs (no body loaded)."""
+    return {
+        "slug": r.slug,
+        "uid": r.uid,
+        "title": r.title,
+        "doc_class": r.doc_class,
+        "type": r.subtype,
+        "tags": r.tags or [],
+        "url": r.url,
+        "collection": r.collection,
+        "immutable": bool(r.immutable),
+        "created_at": r.created_at.isoformat() if r.created_at else None,
+        "updated_at": r.updated_at.isoformat() if r.updated_at else None,
     }
-    if include_body:
-        d["body"] = s.body
-    return d
 
 
-def get_page(db: Session, slug: str) -> Page | None:
-    return db.query(Page).filter(Page.slug == slug).first()
+# --- reads --------------------------------------------------------------------
 
 
-def get_source(db: Session, slug: str) -> RawSource | None:
-    return db.query(RawSource).filter(RawSource.slug == slug).first()
+def get_doc(db: Session, slug: str) -> Document | None:
+    return db.query(Document).filter(Document.slug == slug).first()
 
 
-# --- link resolution ----------------------------------------------------------
+def list_docs(
+    db: Session,
+    doc_class: str | None = None,
+    subtype: str | None = None,
+    tag: str | None = None,
+    collection: str | None = None,
+    limit: int | None = None,
+    offset: int = 0,
+):
+    """List documents without loading bodies.
+
+    Only the columns callers render are selected — listing used to be `SELECT *`, shipping
+    every body across the wire just to filter on a tag.
+    """
+    q = db.query(
+        Document.id,
+        Document.slug,
+        Document.uid,
+        Document.title,
+        Document.doc_class,
+        Document.subtype,
+        Document.tags,
+        Document.url,
+        Document.collection,
+        Document.immutable,
+        Document.created_at,
+        Document.updated_at,
+    )
+    if doc_class:
+        q = q.filter(Document.doc_class == doc_class)
+    if subtype:
+        q = q.filter(Document.subtype == subtype)
+    if collection:
+        q = q.filter(Document.collection == collection)
+    if tag:
+        # GIN-indexed containment, not a Python scan over every row.
+        q = q.filter(Document.tags.contains([tag]))
+
+    q = q.order_by(Document.title)
+    if offset:
+        q = q.offset(offset)
+    if limit:
+        q = q.limit(limit)
+    return q.all()
+
+
+def tag_counts(db: Session) -> list[dict]:
+    counts: dict[str, int] = {}
+    for (tags,) in db.query(Document.tags).all():
+        for t in tags or []:
+            counts[t] = counts.get(t, 0) + 1
+    return [
+        {"tag": t, "count": c} for t, c in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    ]
+
+
+# --- links --------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
-class SlugIndex:
-    """In-memory slug/uid map, built with one query.
+class LinkIndex:
+    """In-memory slug/uid/title map, built with one query.
 
-    Resolving links used to cost up to three SELECTs *per wikilink*, for every link of every
-    page — roughly 12,000 queries to render the graph of a 500-page wiki.
+    Resolving a link used to cost up to three SELECTs *per wikilink*, for every link of every
+    document — thousands of queries to render one graph.
     """
 
     by_slug: dict[str, str]
     by_uid: dict[str, str]
+    by_title: dict[str, str]
 
     def resolve(self, target: str) -> str | None:
         t = target.strip()
@@ -81,45 +160,33 @@ class SlugIndex:
             return t
         if t in self.by_uid:
             return self.by_uid[t]
-        return self.by_slug.get(slugify(t))
+        slugged = slugify(t)
+        if slugged in self.by_slug:
+            return slugged
+        # Sources live under a prefix; let [[Some Article]] find src-some-article.
+        prefixed = f"{SOURCE_PREFIX}{slugged}"
+        if prefixed in self.by_slug:
+            return prefixed
+        return self.by_title.get(t.casefold())
 
 
-def build_slug_index(db: Session) -> SlugIndex:
-    rows = db.query(Page.slug, Page.uid).all()
-    return SlugIndex(
-        by_slug={slug: slug for slug, _ in rows},
-        by_uid={uid: slug for slug, uid in rows if uid},
+def build_link_index(db: Session) -> LinkIndex:
+    rows = db.query(Document.slug, Document.uid, Document.title).all()
+    return LinkIndex(
+        by_slug={slug: slug for slug, _, _ in rows},
+        by_uid={uid: slug for slug, uid, _ in rows if uid},
+        by_title={title.casefold(): slug for slug, _, title in rows if title},
     )
 
 
-def resolve_slug(db: Session, target: str) -> str | None:
-    """Resolve one link target. In a loop, build a SlugIndex once instead."""
-    return build_slug_index(db).resolve(target)
-
-
-def get_backlinks(db: Session, slug: str) -> list[dict]:
-    index = build_slug_index(db)
-    rows = db.query(Page.slug, Page.title, Page.page_type, Page.body).all()
-    results = []
-    for other_slug, title, page_type, body in rows:
-        if other_slug == slug:
-            continue
-        for link in parse_wikilinks(body or ""):
-            if index.resolve(link.target) == slug:
-                results.append({"slug": other_slug, "title": title, "type": page_type})
-                break
-    return results
-
-
-def get_outgoing_links(db: Session, page: Page) -> list[dict]:
-    """Links leaving this page, flagged with whether the target exists (red links)."""
-    index = build_slug_index(db)
+def outgoing_links(doc: Document, index: LinkIndex) -> list[dict]:
+    """Links leaving this document, flagged with whether the target exists (red links)."""
     seen: set[str] = set()
     out = []
-    for link in parse_wikilinks(page.body or ""):
+    for link in parse_wikilinks(doc.body or ""):
         resolved = index.resolve(link.target)
         key = resolved or link.target
-        if key in seen or resolved == page.slug:
+        if key in seen or resolved == doc.slug:
             continue
         seen.add(key)
         out.append(
@@ -133,187 +200,309 @@ def get_outgoing_links(db: Session, page: Page) -> list[dict]:
     return out
 
 
-def list_pages(db: Session) -> list[Page]:
-    return db.query(Page).order_by(Page.title).all()
+def backlinks(db: Session, slug: str, index: LinkIndex) -> list[dict]:
+    rows = db.query(
+        Document.slug, Document.title, Document.subtype, Document.doc_class, Document.body
+    ).all()
+    results = []
+    for other, title, subtype, doc_class, body in rows:
+        if other == slug:
+            continue
+        for link in parse_wikilinks(body or ""):
+            if index.resolve(link.target) == slug:
+                results.append(
+                    {"slug": other, "title": title, "type": subtype, "doc_class": doc_class}
+                )
+                break
+    return results
 
 
 # --- writes -------------------------------------------------------------------
 
 
-def upsert_page(
-    db: Session,
-    slug: str,
-    title: str,
-    body: str,
-    page_type: str = "page",
-    uid: str | None = None,
-    tags: list | None = None,
-    source_refs: list | None = None,
-    protect_curated: bool = False,
-) -> Page:
-    """Create or update a page.
-
-    Automated writers pass protect_curated=True so they can never clobber a hand-written
-    note that happens to share a slug.
-    """
-    p = get_page(db, slug)
-    if p:
-        if protect_curated and p.page_type in CURATED_TYPES and p.page_type != page_type:
-            raise ValueError(f"Refusing to overwrite curated page '{slug}' (type '{p.page_type}')")
-        p.title = title
-        p.body = body
-        p.page_type = page_type
-        if uid:
-            p.uid = uid
-        if tags is not None:
-            p.tags = tags
-        if source_refs is not None:
-            p.source_refs = source_refs
-        p.updated_at = utcnow()
-    else:
-        p = Page(
-            slug=slug,
-            uid=uid,
-            title=title,
-            body=body,
-            page_type=page_type,
-            tags=tags or [],
-            source_refs=source_refs or [],
-        )
-        db.add(p)
-    db.commit()
-    db.refresh(p)
-    return p
+class Immutable(ValueError):
+    """Attempted to edit captured source material."""
 
 
-def delete_page(db: Session, slug: str) -> bool:
-    p = get_page(db, slug)
-    if not p:
-        return False
-    db.delete(p)
-    db.commit()
-    log_action(db, "delete", f"Deleted page '{slug}'")
-    return True
+def _snapshot(db: Session, doc: Document) -> None:
+    db.add(Revision(document_id=doc.id, title=doc.title, body=doc.body or ""))
 
 
-def new_uid() -> str:
-    return utcnow().strftime("%Y%m%d%H%M%S")
+def _starter_body(title: str) -> str:
+    return f"""# {title}
 
-
-def create_zettel(db: Session, title: str, body: str | None = None) -> Page:
-    slug = slugify(title)
-    if not slug:
-        # slugify() strips everything non-ASCII, so e.g. a CJK-only title yields "" — which
-        # previously created a page at an unreachable URL.
-        raise ValueError("Title must contain at least one letter or number")
-    if get_page(db, slug):
-        raise ValueError(f"Page already exists: {slug}")
-    uid = new_uid()
-    if body is None:
-        body = f"""# {title}
-
-## Context & Core Principle
+## Context & core principle
 
 *State the single atomic concept clearly.*
 
-## Related Knowledge & Links
+## Related
 
 -
 """
-    p = upsert_page(db, slug, title, body, page_type="zettel", uid=uid, tags=["zettel", "atomic"])
-    log_action(db, "zettel", f"Created '{title}' ({slug})")
-    return p
 
 
-def import_markdown_file(db: Session, path: str, page_type: str | None = None) -> Page | None:
-    fp = Path(path)
-    if not fp.is_file():
-        return None
-    text = fp.read_text(encoding="utf-8")
-    fm, body = parse_frontmatter(text)
-
-    stem = fp.stem
-    # Atomic notes are named "<14-digit uid>-<slug>.md"; keep only the slug part.
-    if re.match(r"^\d{14}-", stem):
-        stem = stem.split("-", 1)[1]
-    slug = slugify(stem)
+def create_note(
+    db: Session,
+    title: str,
+    body: str | None = None,
+    subtype: str = "zettel",
+    tags: list[str] | None = None,
+    derived_from_id: int | None = None,
+    slug: str | None = None,
+) -> Document:
+    title = (title or "").strip()
+    slug = slug or note_slug(title)
     if not slug:
-        return None
+        # slugify() strips non-ASCII, so a CJK-only title yields "" and an unreachable URL.
+        raise ValueError("Title must contain at least one letter or number")
+    if get_doc(db, slug):
+        raise ValueError(f"A document already exists at '{slug}'")
 
-    title = fm.get("title") or fp.stem.replace("-", " ").title()
+    doc = Document(
+        slug=slug,
+        uid=new_uid(),
+        title=title or slug,
+        doc_class=NOTE,
+        subtype=subtype,
+        body=_starter_body(title) if body is None else body,
+        tags=tags or [],
+        derived_from_id=derived_from_id,
+        immutable=False,
+    )
+    db.add(doc)
+    db.commit()
+    db.refresh(doc)
+    log_action(db, "create", f"Created note '{title}' ({slug})")
+    return doc
+
+
+def update_note(
+    db: Session,
+    doc: Document,
+    title: str | None = None,
+    body: str | None = None,
+    tags: list[str] | None = None,
+    subtype: str | None = None,
+) -> Document:
+    if doc.immutable:
+        raise Immutable(
+            f"'{doc.slug}' is captured source material and cannot be edited. "
+            "Write a note about it instead."
+        )
+
+    if (body is not None and body != doc.body) or (title is not None and title != doc.title):
+        _snapshot(db, doc)
+
+    if title is not None:
+        doc.title = title.strip() or doc.title
+    if body is not None:
+        doc.body = body
+    if tags is not None:
+        doc.tags = tags
+    if subtype is not None:
+        doc.subtype = subtype
+    doc.updated_at = utcnow()
+    db.commit()
+    db.refresh(doc)
+    log_action(db, "edit", f"Edited '{doc.slug}'")
+    return doc
+
+
+def revisions(db: Session, doc: Document, limit: int = 20) -> list[Revision]:
+    return (
+        db.query(Revision)
+        .filter(Revision.document_id == doc.id)
+        .order_by(Revision.created_at.desc(), Revision.id.desc())
+        .limit(limit)
+        .all()
+    )
+
+
+def restore_revision(db: Session, doc: Document, revision_id: int) -> Document:
+    rev = (
+        db.query(Revision)
+        .filter(Revision.id == revision_id, Revision.document_id == doc.id)
+        .first()
+    )
+    if not rev:
+        raise ValueError("That revision does not belong to this document")
+    return update_note(db, doc, title=rev.title, body=rev.body)
+
+
+def delete_doc(db: Session, slug: str) -> bool:
+    doc = get_doc(db, slug)
+    if not doc:
+        return False
+    # A literature note whose source is deleted keeps its text and loses the link.
+    db.query(Document).filter(Document.derived_from_id == doc.id).update({"derived_from_id": None})
+    db.query(Revision).filter(Revision.document_id == doc.id).delete()
+    db.delete(doc)
+    db.commit()
+    log_action(db, "delete", f"Deleted '{slug}'")
+    return True
+
+
+def store_source(
+    db: Session,
+    *,
+    title: str,
+    body: str,
+    subtype: str,
+    url: str | None = None,
+    extra: dict | None = None,
+    collection: str | None = None,
+    slug_hint: str = "",
+    log_label: str | None = None,
+) -> tuple[Document, bool]:
+    """Store captured material. Returns (document, created).
+
+    The single place a source becomes a row — every ingest path goes through here, so none
+    can forget to log it or to mark it immutable.
+    """
+    slug = source_slug(title, slug_hint)
+    existing = get_doc(db, slug)
+    if existing:
+        # Same slug, different URL: keep both rather than silently discarding the new one.
+        if url and existing.url and existing.url != url:
+            suffix = slugify(url.rsplit("/", 1)[-1])[:20] or new_uid()[-6:]
+            slug = f"{slug}-{suffix}"[:MAX_SLUG_LEN]
+            existing = get_doc(db, slug)
+        if existing:
+            return existing, False
+
+    doc = Document(
+        slug=slug,
+        uid=new_uid(),
+        title=title or slug,
+        doc_class=SOURCE,
+        subtype=subtype,
+        body=body,
+        url=url,
+        extra=extra or {},
+        collection=collection,
+        immutable=True,
+        tags=[],
+    )
+    db.add(doc)
+    db.commit()
+    db.refresh(doc)
+    log_action(db, "ingest", log_label or f"{subtype}: {title}")
+    return doc, True
+
+
+def upsert_literature_note(
+    db: Session, source: Document, title: str, body: str, tags: list[str]
+) -> Document:
+    """Create or replace the literature note derived from a source.
+
+    Linked by foreign key rather than by a slug naming convention, so it can never land on
+    top of something you wrote — and the previous version is snapshotted first.
+    """
+    existing = (
+        db.query(Document)
+        .filter(Document.derived_from_id == source.id, Document.subtype == "literature")
+        .first()
+    )
+    if existing:
+        _snapshot(db, existing)
+        existing.title = title
+        existing.body = body
+        existing.tags = tags
+        existing.updated_at = utcnow()
+        db.commit()
+        db.refresh(existing)
+        return existing
+
+    base = note_slug(f"summary {title}") or f"summary-{source.slug}"
+    slug, n = base, 2
+    while get_doc(db, slug):
+        slug = f"{base}-{n}"[:MAX_SLUG_LEN]
+        n += 1
+    return create_note(
+        db,
+        title=title,
+        body=body,
+        subtype="literature",
+        tags=tags,
+        derived_from_id=source.id,
+        slug=slug,
+    )
+
+
+def import_markdown(db: Session, path: Path, subtype_hint: str | None = None) -> Document | None:
+    """Import one markdown file with YAML frontmatter.
+
+    Used by both first-boot seeding and POST /api/import, so restoring a backup and shipping
+    starter content are the same code path.
+    """
+    if not path.is_file():
+        return None
+    fm, body = parse_frontmatter(path.read_text(encoding="utf-8"))
+
+    stem = path.stem
+    if re.match(r"^\d{14}-", stem):  # legacy "<uid>-<slug>.md"
+        stem = stem.split("-", 1)[1]
+
+    subtype = str(fm.get("type") or subtype_hint or "page")
+    declared = fm.get("class")
+    doc_class = str(declared) if declared else (SOURCE if subtype in SOURCE_SUBTYPE_SET else NOTE)
+
+    title = str(fm.get("title") or stem.replace("-", " ").title())
     m = re.search(r"^#\s+(.*)$", body, re.MULTILINE)
     if m:
         title = m.group(1).strip()
 
-    ptype = page_type or fm.get("type", "page")
-    return upsert_page(
-        db,
-        slug=slug,
-        title=str(title),
-        body=body.strip(),
-        page_type=str(ptype),
-        uid=fm.get("uid"),
-        tags=fm.get("tags", []),
-        source_refs=fm.get("sources", []),
+    slug = (
+        source_slug(title, stem) if doc_class == SOURCE else (note_slug(stem) or note_slug(title))
     )
+    if not slug:
+        return None
 
-
-def upsert_source(
-    db: Session,
-    slug: str,
-    title: str,
-    body: str,
-    source_type: str,
-    url: str | None = None,
-    extra: dict | None = None,
-    collection: str | None = None,
-) -> tuple[RawSource, bool]:
-    """Store an immutable raw source. Returns (source, created).
-
-    Sources are never mutated once stored. Two different URLs that slugify to the same title
-    get distinct slugs via a short URL hash — previously the second one was silently dropped
-    while the API still reported success.
-    """
-    url_hash = hashlib.sha256(url.encode("utf-8")).hexdigest()[:8] if url else None
-
-    existing = get_source(db, slug)
-    if existing:
-        if url_hash and existing.url_hash and existing.url_hash != url_hash:
-            slug = f"{slug}-{url_hash}"
-            existing = get_source(db, slug)
-        if existing:
-            return existing, False
-
-    s = RawSource(
-        slug=slug,
-        title=title,
-        body=body,
-        source_type=source_type,
-        url=url,
-        url_hash=url_hash,
-        extra=extra or {},
-        collection=collection,
-    )
-    db.add(s)
+    doc = get_doc(db, slug)
+    if doc:
+        if (doc.body or "") != body.strip():
+            _snapshot(db, doc)
+        doc.title = title
+        doc.body = body.strip()
+        doc.subtype = subtype
+        doc.tags = fm.get("tags") or []
+        doc.updated_at = utcnow()
+    else:
+        doc = Document(
+            slug=slug,
+            uid=str(fm.get("uid") or new_uid()),
+            title=title,
+            doc_class=doc_class,
+            subtype=subtype,
+            body=body.strip(),
+            tags=fm.get("tags") or [],
+            url=fm.get("url"),
+            immutable=doc_class == SOURCE,
+        )
+        db.add(doc)
     db.commit()
-    db.refresh(s)
-    return s, True
+    db.refresh(doc)
+    return doc
 
 
-def delete_source(db: Session, slug: str) -> bool:
-    s = get_source(db, slug)
-    if not s:
-        return False
-    db.delete(s)
-    db.commit()
-    log_action(db, "delete", f"Deleted source '{slug}'")
-    return True
+def to_markdown(doc: Document) -> str:
+    """Serialise a document back to markdown with YAML frontmatter (inverse of import)."""
+    import yaml
 
-
-def summary_slug(source_slug: str) -> str:
-    """Slug for the literature note generated from a source.
-
-    Namespaced so an AI summary can never land on top of the curated note about the same
-    material — which is exactly what used to happen for the bundled seed data.
-    """
-    return f"summary-{source_slug}"[:80]
+    meta = {
+        "uid": doc.uid,
+        "title": doc.title,
+        "class": doc.doc_class,
+        "type": doc.subtype,
+        "created": doc.created_at.date().isoformat() if doc.created_at else None,
+        "updated": doc.updated_at.date().isoformat() if doc.updated_at else None,
+    }
+    if doc.tags:
+        meta["tags"] = list(doc.tags)
+    if doc.url:
+        meta["url"] = doc.url
+    if doc.collection:
+        meta["collection"] = doc.collection
+    meta = {k: v for k, v in meta.items() if v is not None}
+    front = yaml.safe_dump(meta, sort_keys=False, allow_unicode=True).strip()
+    return f"---\n{front}\n---\n\n{doc.body or ''}\n"

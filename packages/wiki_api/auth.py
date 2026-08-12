@@ -1,4 +1,13 @@
-"""Authentication routes."""
+"""Authentication.
+
+One admin, provisioned from the environment. There is deliberately no signup, no roles, and
+no in-app password change — `_ensure_admin` re-syncs from ADMIN_PASSWORD on every boot, so
+the environment is the credential store.
+
+The wiki is private: every route requires a token. Reads were once public, but literature
+notes reproduce the substance of the sources they summarise, so a public/private split by
+document class protected nothing.
+"""
 
 from __future__ import annotations
 
@@ -33,61 +42,34 @@ class TokenResponse(BaseModel):
 
 class UserResponse(BaseModel):
     email: str
-    role: str
 
 
 @router.post("/login", response_model=TokenResponse)
 def login(body: LoginRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == body.email).first()
     if not user or not verify_password(body.password, user.hashed_password):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
-    if not user.is_active:
-        # Checked here too, not only in _require_user — otherwise a deactivated user still
-        # walks away with a valid 7-day token.
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account disabled")
-    token = create_access_token(
-        {"sub": user.email, "role": user.role},
-        timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
-    )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password"
+        )
+    token = create_access_token({"sub": user.email}, timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
     return TokenResponse(access_token=token)
-
-
-@router.get("/me", response_model=UserResponse)
-def me(
-    creds: HTTPAuthorizationCredentials | None = Depends(security),
-    db: Session = Depends(get_db),
-):
-    user = _require_user(creds, db)
-    return UserResponse(email=user.email, role=user.role)
-
-
-def _require_user(creds: HTTPAuthorizationCredentials | None, db: Session) -> User:
-    if not creds:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
-    payload = decode_token(creds.credentials)
-    if not payload or "sub" not in payload:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
-    user = db.query(User).filter(User.email == payload["sub"]).first()
-    if not user or not user.is_active:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
-    return user
 
 
 def get_current_user(
     creds: HTTPAuthorizationCredentials | None = Depends(security),
     db: Session = Depends(get_db),
 ) -> User:
-    return _require_user(creds, db)
-
-
-def get_optional_user(
-    creds: HTTPAuthorizationCredentials | None = Depends(security),
-    db: Session = Depends(get_db),
-) -> User | None:
     if not creds:
-        return None
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
     payload = decode_token(creds.credentials)
     if not payload or "sub" not in payload:
-        return None
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session expired")
     user = db.query(User).filter(User.email == payload["sub"]).first()
-    return user if user and user.is_active else None
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session expired")
+    return user
+
+
+@router.get("/me", response_model=UserResponse)
+def me(user: User = Depends(get_current_user)):
+    return UserResponse(email=user.email)

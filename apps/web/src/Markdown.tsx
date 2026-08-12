@@ -1,10 +1,13 @@
 import React, { useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
+// Loaded with this component, so the ~24KB of KaTeX CSS and its fonts stay out of the
+// initial page load.
+import 'katex/dist/katex.min.css';
 import { useNavigate } from 'react-router-dom';
 import rehypeKatex from 'rehype-katex';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
-import type { WikiLink } from './api';
+import { docPath, type WikiLink } from './api';
 
 interface Props {
   content: string;
@@ -37,14 +40,24 @@ export function Markdown({ content, links }: Props) {
         const link = resolved.get(target);
         // Unknown targets render as red links rather than navigating to a 404.
         if (link && !link.exists) {
+          // Unwritten notes are an invitation, not a dead end.
           return (
-            <span className="red-link" title="This note does not exist yet">
+            <a
+              href={`/edit/new?title=${encodeURIComponent(target)}`}
+              className="red-link"
+              title="This note does not exist yet — click to write it"
+              onClick={(e) => {
+                if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+                e.preventDefault();
+                navigate(`/edit/new?title=${encodeURIComponent(target)}`);
+              }}
+            >
               {children}
-            </span>
+            </a>
           );
         }
         const slug = link?.slug || target;
-        const to = `/wiki/${encodeURIComponent(slug)}`;
+        const to = docPath(slug);
         return (
           <a
             href={to}

@@ -1,28 +1,17 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
-import { getGraph, type GraphData } from './api';
+import { docPath, getGraph } from './api';
 import { GraphView, TYPE_COLORS } from './GraphView';
+import { useAsync } from './hooks';
 
 export function GraphPage() {
-  const [data, setData] = useState<GraphData | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [params] = useSearchParams();
+  const [includeSources, setIncludeSources] = useState(true);
   const navigate = useNavigate();
   const focus = params.get('focus') || undefined;
 
-  useEffect(() => {
-    getGraph()
-      .then((d) => {
-        setData(d);
-        setError(null);
-      })
-      .catch((err) => setError(err.message || 'Could not load the graph'));
-  }, []);
-
-  const onSelect = useCallback(
-    (slug: string) => navigate(`/wiki/${encodeURIComponent(slug)}`),
-    [navigate],
-  );
+  const { data, error, loading } = useAsync(() => getGraph(includeSources), [includeSources]);
+  const onSelect = useCallback((slug: string) => navigate(docPath(slug)), [navigate]);
 
   if (error) {
     return (
@@ -35,8 +24,7 @@ export function GraphPage() {
       </div>
     );
   }
-
-  if (!data) return <div className="container muted">Loading graph…</div>;
+  if (loading || !data) return <div className="container muted">Loading graph…</div>;
 
   if (data.nodes.length === 0) {
     return (
@@ -56,18 +44,28 @@ export function GraphPage() {
     <div className="container graph-page">
       <div className="row space-between wrap">
         <p className="muted small">
-          {data.nodes.length} notes · {data.edges.length} links · click a node to open it
+          {data.nodes.length} documents · {data.edges.length} links · click a node to open it
         </p>
-        <div className="row gap wrap legend">
-          {types.map((t) => (
-            <span key={t} className="legend-item">
-              <span
-                className="legend-dot"
-                style={{ background: TYPE_COLORS[t] || TYPE_COLORS.page }}
-              />
-              {t}
-            </span>
-          ))}
+        <div className="row gap wrap">
+          <label className="checkbox">
+            <input
+              type="checkbox"
+              checked={includeSources}
+              onChange={(e) => setIncludeSources(e.target.checked)}
+            />
+            Show sources
+          </label>
+          <div className="row gap wrap legend">
+            {types.map((t) => (
+              <span key={t} className="legend-item">
+                <span
+                  className="legend-dot"
+                  style={{ background: TYPE_COLORS[t] || TYPE_COLORS.page }}
+                />
+                {t}
+              </span>
+            ))}
+          </div>
         </div>
       </div>
       <GraphView data={data} onSelect={onSelect} focusSlug={focus} />

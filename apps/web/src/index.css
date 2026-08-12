@@ -422,3 +422,6 @@ input:focus, textarea:focus, select:focus {
 }
 .login-card h1 { margin-bottom: 1.25rem; font-size: 1.4rem; }
 .login-card form { display: flex; flex-direction: column; gap: 0.85rem; }
+
+.revision-list { list-style: none; display: flex; flex-direction: column; gap: 0.4rem; margin-top: 0.5rem; }
+.revision-list li { display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; }

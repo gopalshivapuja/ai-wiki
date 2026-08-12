@@ -1,4 +1,4 @@
-"""Ingest pipelines — write directly to PostgreSQL."""
+"""Ingest pipelines. Every path ends at content.store_source()."""
 
 from __future__ import annotations
 
@@ -6,18 +6,16 @@ import json
 import logging
 import re
 import urllib.parse
+from pathlib import Path
 
 from sqlalchemy.orm import Session
 from wiki_core.llm import call_llm
-from wiki_core.utils import slugify
 
-from wiki_api.database import RawSource
+from wiki_api.database import Document
 from wiki_api.services.content import (
-    log_action,
-    new_uid,
-    summary_slug,
-    upsert_page,
-    upsert_source,
+    get_doc,
+    store_source,
+    upsert_literature_note,
 )
 from wiki_api.services.fetch import (
     FetchError,
@@ -29,23 +27,46 @@ from wiki_api.services.fetch import (
 
 logger = logging.getLogger(__name__)
 
-# Cap on how much of each retrieved page is fed to the model. Without it, five long pages
-# produce a prompt big enough for the provider to reject outright.
-RAG_CHARS_PER_PAGE = 4_000
+# Caps on what reaches the model. Without them, five long documents make a prompt the
+# provider rejects outright.
+RAG_CHARS_PER_DOC = 4_000
 SUMMARIZE_CHARS = 8_000
+MAX_PDF_PAGES = 500
+
+
+# --- web ----------------------------------------------------------------------
+
+
+def store_web_page(
+    db: Session, url: str, html: str, collection: str | None = None
+) -> tuple[Document, bool]:
+    """Store already-fetched HTML.
+
+    Separate from ingest_web so the crawler can pass the HTML it just read. Previously the
+    crawler fetched each page for its links and then ingest_web fetched the same URL again —
+    50 requests for a 25-page crawl.
+    """
+    title = page_title(html, url)
+    body = clamp(f"# {title}\n\n**Source:** [{url}]({url})\n\n---\n\n{html_to_markdown(html)}")
+    return store_source(
+        db,
+        title=title,
+        body=body,
+        subtype="web",
+        url=url,
+        collection=collection,
+        slug_hint=url,
+        log_label=f"Web: {title}",
+    )
 
 
 def ingest_web(db: Session, url: str, collection: str | None = None) -> dict:
-    _, html = fetch_text(url, expect_html=False)
-    title = page_title(html, url)
-    md = html_to_markdown(html)
+    _, html = fetch_text(url)
+    doc, created = store_web_page(db, url, html, collection)
+    return _result(doc, created)
 
-    slug = slugify(title) or f"web-{abs(hash(url)) % 10**8}"
-    content = clamp(f"# {title}\n\n**Source:** [{url}]({url})\n\n---\n\n{md}")
-    source, created = upsert_source(db, slug, title, content, "web", url=url, collection=collection)
-    if created:
-        log_action(db, "ingest", f"Web: {title}")
-    return {"slug": source.slug, "title": source.title, "type": "web", "created": created}
+
+# --- arXiv --------------------------------------------------------------------
 
 
 def ingest_arxiv(db: Session, id_or_url: str) -> dict:
@@ -63,46 +84,41 @@ def ingest_arxiv(db: Session, id_or_url: str) -> dict:
         if tm:
             title = re.sub(r"\s+", " ", tm.group(1)).strip()
     sm = re.search(r"<summary>(.*?)</summary>", xml, re.DOTALL)
-    summary = re.sub(r"\s+", " ", sm.group(1)).strip() if sm else ""
+    abstract = re.sub(r"\s+", " ", sm.group(1)).strip() if sm else ""
     authors = ", ".join(re.findall(r"<name>(.*?)</name>", xml)[:8])
 
-    slug = slugify(title) or f"arxiv-{slugify(arxiv_id)}"
     url = f"https://arxiv.org/abs/{arxiv_id}"
-    content = (
+    body = (
         f"# {title}\n\n**arXiv:** [{arxiv_id}]({url})\n**Authors:** {authors}\n\n"
-        f"## Abstract\n\n{summary}"
+        f"## Abstract\n\n{abstract}"
     )
-    source, created = upsert_source(
+    doc, created = store_source(
         db,
-        slug,
-        title,
-        content,
-        "arxiv",
+        title=title,
+        body=body,
+        subtype="arxiv",
         url=url,
         extra={"arxiv_id": arxiv_id, "authors": authors},
+        slug_hint=arxiv_id,
+        log_label=f"arXiv: {title}",
     )
 
-    # The literature note gets its own namespaced slug so it can never overwrite a curated
-    # page about the same paper.
-    note_slug = summary_slug(source.slug)
-    note_body = (
-        f"# Source Summary: {title}\n\n**Source:** [[{note_slug}|{title}]]\n\n"
-        f"**Authors:** {authors}\n\n## Abstract\n\n{summary}\n"
-    )
-    upsert_page(
-        db,
-        note_slug,
-        f"Source Summary: {title}",
-        note_body,
-        "literature",
-        uid=new_uid(),
-        tags=["source-summary", "arxiv"],
-        source_refs=[source.slug],
-        protect_curated=True,
-    )
     if created:
-        log_action(db, "ingest", f"arXiv: {title}")
-    return {"slug": source.slug, "title": title, "type": "arxiv", "created": created}
+        # Links to the source, not to itself — the note used to cite its own slug.
+        upsert_literature_note(
+            db,
+            doc,
+            title=f"Source summary: {title}",
+            body=(
+                f"# Source summary: {title}\n\n**Source:** [[{doc.slug}|{title}]]\n\n"
+                f"**Authors:** {authors}\n\n## Abstract\n\n{abstract}\n"
+            ),
+            tags=["source-summary", "arxiv"],
+        )
+    return _result(doc, created)
+
+
+# --- YouTube ------------------------------------------------------------------
 
 
 def extract_video_id(url_or_id: str) -> str:
@@ -131,25 +147,22 @@ def fetch_youtube_metadata(vid: str) -> dict:
 
 
 def fetch_youtube_transcript(vid: str) -> str | None:
-    """Fetch captions. Returns None when the video has none.
+    """Fetch captions, or None when the video has none.
 
-    youtube-transcript-api 1.x removed the YouTubeTranscriptApi.get_transcript classmethod
-    in favour of an instance .fetch(); the old call failed for every video and the error was
-    swallowed into the stored body.
+    youtube-transcript-api 1.x removed the get_transcript classmethod in favour of an
+    instance .fetch(); the old call failed for every video and the error was swallowed into
+    the stored body.
     """
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
     except ImportError:
         logger.warning("youtube-transcript-api is not installed")
         return None
-
     try:
-        api = YouTubeTranscriptApi()
-        fetched = api.fetch(vid)
+        fetched = YouTubeTranscriptApi().fetch(vid)
         snippets = getattr(fetched, "snippets", fetched)
         parts = [(s.text if hasattr(s, "text") else s.get("text", "")) for s in snippets]
-        text = "\n".join(p for p in parts if p).strip()
-        return text or None
+        return "\n".join(p for p in parts if p).strip() or None
     except Exception as exc:
         logger.info("No transcript for %s: %s", vid, exc)
         return None
@@ -167,92 +180,158 @@ def ingest_youtube(db: Session, url_or_id: str) -> dict:
             f"'{title}' has no captions. Use 'Transcribe audio' to run speech-to-text on it."
         )
 
-    slug = slugify(title) or f"youtube-{vid}"
     url = f"https://www.youtube.com/watch?v={vid}"
-    content = clamp(
+    body = clamp(
         f"# {title}\n\n**Channel:** {channel}\n**Video:** [{url}]({url})\n\n"
         f"## Transcript\n\n{transcript}"
     )
-    source, created = upsert_source(
+    doc, created = store_source(
         db,
-        slug,
-        title,
-        content,
-        "youtube",
+        title=title,
+        body=body,
+        subtype="youtube",
         url=url,
         extra={"channel": channel, "video_id": vid, "transcript_source": "captions"},
+        slug_hint=vid,
+        log_label=f"YouTube: {title}",
     )
-    if created:
-        log_action(db, "ingest", f"YouTube: {title}")
-    return {"slug": source.slug, "title": title, "type": "youtube", "created": created}
+    return _result(doc, created)
+
+
+# --- files and text -----------------------------------------------------------
+
+
+def extract_pdf_text(path: Path, max_pages: int = MAX_PDF_PAGES) -> tuple[str, str]:
+    """Return (title, text). Title comes from PDF metadata, falling back to the filename."""
+    from pypdf import PdfReader
+
+    reader = PdfReader(str(path))
+    if reader.is_encrypted:
+        try:
+            reader.decrypt("")
+        except Exception as exc:
+            raise ValueError("This PDF is password protected") from exc
+
+    try:
+        title = (reader.metadata.title or "").strip() if reader.metadata else ""
+    except Exception:
+        title = ""
+    title = title or path.stem.replace("_", " ").replace("-", " ").strip()
+
+    chunks = []
+    for i, page in enumerate(reader.pages):
+        if i >= max_pages:
+            chunks.append(f"\n\n*(stopped after {max_pages} pages)*")
+            break
+        try:
+            chunks.append(page.extract_text() or "")
+        except Exception as exc:
+            logger.warning("Failed to extract page %d of %s: %s", i, path.name, exc)
+
+    text = "\n\n".join(c.strip() for c in chunks if c and c.strip())
+    if not text.strip():
+        raise ValueError(
+            "No text could be extracted — this looks like a scanned PDF, which would need "
+            "OCR. This wiki does not do OCR."
+        )
+    return title, text
+
+
+def ingest_pdf(
+    db: Session, path: Path, title: str | None = None, filename: str | None = None
+) -> dict:
+    extracted_title, text = extract_pdf_text(path)
+    display_name = filename or path.name
+    title = (title or extracted_title).strip() or Path(display_name).stem
+    body = clamp(f"# {title}\n\n**Source:** uploaded PDF ({display_name})\n\n---\n\n{text}")
+    doc, created = store_source(
+        db,
+        title=title,
+        body=body,
+        subtype="pdf",
+        extra={"filename": display_name},
+        slug_hint=Path(display_name).stem,
+        log_label=f"PDF: {title}",
+    )
+    return _result(doc, created)
+
+
+def ingest_paste(db: Session, title: str, text: str) -> dict:
+    title = (title or "").strip()
+    if not title:
+        raise ValueError("Title is required")
+    if not (text or "").strip():
+        raise ValueError("Text is required")
+    doc, created = store_source(
+        db,
+        title=title,
+        body=clamp(f"# {title}\n\n{text.strip()}"),
+        subtype="note",
+        log_label=f"Pasted: {title}",
+    )
+    return _result(doc, created)
+
+
+def _result(doc: Document, created: bool) -> dict:
+    return {"slug": doc.slug, "title": doc.title, "type": doc.subtype, "created": created}
+
+
+# --- AI -----------------------------------------------------------------------
 
 
 def ai_summarize(db: Session, source_slug: str) -> dict:
-    src = db.query(RawSource).filter(RawSource.slug == source_slug).first()
+    src = get_doc(db, source_slug)
     if not src:
-        raise ValueError(f"Source not found: {source_slug}")
+        raise ValueError(f"Nothing found at '{source_slug}'")
 
     summary = call_llm(
         f"SOURCE: {src.title}\n\n{(src.body or '')[:SUMMARIZE_CHARS]}\n\n"
-        "Write a Literature Note in markdown with: a two-sentence summary, 3-6 key "
-        "takeaways as bullets, and a '## Concepts' section listing the atomic concepts "
-        "worth their own note as [[wikilink]] items.",
+        "Write a Literature Note in markdown with: a two-sentence summary, 3-6 key takeaways "
+        "as bullets, and a '## Concepts' section listing the atomic concepts worth their own "
+        "note as [[wikilink]] items.",
         "You are an expert knowledge base summarizer. Output markdown only.",
     )
-    note_slug = summary_slug(src.slug)
-    header = f"# Source Summary: {src.title}\n\n"
+    header = f"# Source summary: {src.title}\n\n**Source:** [[{src.slug}|{src.title}]]\n\n"
     if src.url:
-        header += f"**Source:** [{src.url}]({src.url})\n\n"
-    body = f"{header}{summary}\n"
-    page = upsert_page(
+        header += f"**Original:** [{src.url}]({src.url})\n\n"
+
+    note = upsert_literature_note(
         db,
-        note_slug,
-        f"Source Summary: {src.title}",
-        body,
-        "literature",
-        uid=new_uid(),
+        src,
+        title=f"Source summary: {src.title}",
+        body=f"{header}{summary}\n",
         tags=["source-summary", "ai-generated"],
-        source_refs=[src.slug],
-        protect_curated=True,
     )
-    log_action(db, "ai-summarize", f"Summarized {src.slug}")
-    return {"slug": page.slug, "title": page.title, "source_slug": src.slug}
+    return {"slug": note.slug, "title": note.title, "source_slug": src.slug}
 
 
 def ai_query(db: Session, question: str) -> dict:
-    from wiki_api.database import Page
     from wiki_api.services.search import search
 
     results = search(db, question, top_k=5)
-    context_parts = []
-    citations = []
-    for r in results:
-        if r["kind"] == "page":
-            row = db.query(Page.slug, Page.title, Page.body).filter(Page.slug == r["slug"]).first()
-        else:
-            row = (
-                db.query(RawSource.slug, RawSource.title, RawSource.body)
-                .filter(RawSource.slug == r["slug"])
-                .first()
-            )
-        if not row:
-            continue
-        slug, title, body = row
-        context_parts.append(f"--- {slug} ({title}) ---\n{(body or '')[:RAG_CHARS_PER_PAGE]}\n---")
-        citations.append({"slug": slug, "title": title, "kind": r["kind"]})
-
-    if not context_parts:
+    if not results:
         return {
             "answer": "Nothing in the wiki matches that question yet. Add a source first.",
             "citations": [],
         }
 
-    context = "\n\n".join(context_parts)
+    slugs = [r["slug"] for r in results]
+    docs = {d.slug: d for d in db.query(Document).filter(Document.slug.in_(slugs)).all()}
+
+    context_parts, citations = [], []
+    for slug in slugs:
+        doc = docs.get(slug)
+        if not doc:
+            continue
+        context_parts.append(
+            f"--- {doc.slug} ({doc.title}) ---\n{(doc.body or '')[:RAG_CHARS_PER_DOC]}\n---"
+        )
+        citations.append({"slug": doc.slug, "title": doc.title, "doc_class": doc.doc_class})
+
     answer = call_llm(
-        f"QUESTION: {question}\n\nWIKI CONTEXT:\n{context}\n\n"
+        f"QUESTION: {question}\n\nWIKI CONTEXT:\n" + "\n\n".join(context_parts) + "\n\n"
         "Answer using only the context above. Cite with [[slug|Title]] wikilinks. "
         "If the context does not answer the question, say so plainly.",
         "You answer strictly from the provided wiki context. Use wikilinks for citations.",
     )
-    log_action(db, "query", question[:100])
     return {"answer": answer, "citations": citations}

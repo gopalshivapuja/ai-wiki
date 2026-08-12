@@ -14,7 +14,7 @@ from wiki_core.utils import slugify
 
 from wiki_api.services.content import log_action
 from wiki_api.services.fetch import MAX_HTML_BYTES, FetchError, fetch_text
-from wiki_api.services.ingest import ingest_web
+from wiki_api.services.ingest import store_web_page
 
 logger = logging.getLogger(__name__)
 
@@ -98,9 +98,10 @@ def crawl_site(
     on_progress: ProgressFn | None = None,
     should_stop: StopFn | None = None,
 ) -> dict:
-    """Crawl a docs section. One RawSource per page, all sharing a collection name.
+    """Crawl a docs section. One source document per page, all sharing a collection name.
 
-    Page bodies are stored and dropped one at a time — nothing accumulates in memory.
+    Each page is fetched exactly once and its HTML is used for both link extraction and
+    storage; bodies are written and dropped one at a time, so nothing accumulates in memory.
     """
     max_pages = max(1, min(int(max_pages), HARD_MAX_PAGES))
     max_depth = max(0, min(int(max_depth), 5))
@@ -128,8 +129,8 @@ def crawl_site(
             continue
 
         try:
-            result = ingest_web(db, url, collection=collection)
-            created.append(result["slug"])
+            doc, _ = store_web_page(db, url, html, collection=collection)
+            created.append(doc.slug)
         except Exception as exc:
             failed.append({"url": url, "error": str(exc)})
 

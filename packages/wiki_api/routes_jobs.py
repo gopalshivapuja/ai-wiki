@@ -1,13 +1,9 @@
-"""Job endpoints. Mounted at /api/jobs.
-
-Everything here either costs money or writes, so all routes require authentication.
-"""
+"""Ingest and background-job endpoints, mounted at /api/jobs."""
 
 from __future__ import annotations
 
+import base64
 import logging
-import tempfile
-from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
@@ -15,12 +11,14 @@ from sqlalchemy.orm import Session
 
 from wiki_api.auth import get_current_user
 from wiki_api.database import Job, User, get_db, utcnow
-from wiki_api.jobs.runner import TooManyJobs, enqueue, job_to_dict
+from wiki_api.jobs.runner import enqueue, job_to_dict
 from wiki_api.services.crawl import DEFAULT_MAX_DEPTH, DEFAULT_MAX_PAGES, HARD_MAX_PAGES
 from wiki_api.services.fetch import MAX_PDF_BYTES
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+MAX_IMPORT_BYTES = 100_000_000
 
 
 class UrlBody(BaseModel):
@@ -50,12 +48,18 @@ class SummarizeBody(BaseModel):
     source_slug: str = Field(min_length=1, max_length=200)
 
 
-def _submit(db: Session, kind: str, params: dict) -> dict:
-    try:
-        job = enqueue(db, kind, params)
-    except TooManyJobs as exc:
-        raise HTTPException(429, str(exc)) from exc
-    return job_to_dict(job)
+def _submit(db: Session, kind: str, params: dict, payload: str | None = None) -> dict:
+    return job_to_dict(enqueue(db, kind, params, payload))
+
+
+async def _read_upload(file: UploadFile, max_bytes: int) -> bytes:
+    chunks, size = [], 0
+    while chunk := await file.read(1024 * 1024):
+        size += len(chunk)
+        if size > max_bytes:
+            raise HTTPException(413, f"File exceeds the {max_bytes // 1_000_000}MB limit")
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 @router.post("/web")
@@ -123,37 +127,28 @@ async def job_pdf(
 ):
     if not (file.filename or "").lower().endswith(".pdf"):
         raise HTTPException(400, "Only .pdf files are supported")
-
-    # Streamed to disk rather than read into memory — a 25MB upload should not become a
-    # 25MB bytes object in a 512MB container.
-    tmp = Path(tempfile.gettempdir()) / f"wiki-upload-{utcnow().strftime('%Y%m%d%H%M%S%f')}.pdf"
-    size = 0
-    try:
-        with tmp.open("wb") as out:
-            while chunk := await file.read(1024 * 1024):
-                size += len(chunk)
-                if size > MAX_PDF_BYTES:
-                    raise HTTPException(
-                        413, f"PDF exceeds the {MAX_PDF_BYTES // 1_000_000}MB limit"
-                    )
-                out.write(chunk)
-    except HTTPException:
-        tmp.unlink(missing_ok=True)
-        raise
-    except Exception:
-        tmp.unlink(missing_ok=True)
-        raise
-
+    data = await _read_upload(file, MAX_PDF_BYTES)
+    # Stored in the job row rather than on ephemeral disk, so a redeploy between upload and
+    # execution cannot lose the file and retry works.
     return _submit(
         db,
         "pdf",
-        {
-            "upload_path": str(tmp),
-            "title": title,
-            "filename": file.filename,
-            "summarize": summarize,
-        },
+        {"title": title, "filename": file.filename, "summarize": summarize},
+        base64.b64encode(data).decode(),
     )
+
+
+@router.post("/import")
+async def job_import(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Restore an export, or import any folder of markdown with YAML frontmatter."""
+    if not (file.filename or "").lower().endswith(".zip"):
+        raise HTTPException(400, "Upload a .zip archive")
+    data = await _read_upload(file, MAX_IMPORT_BYTES)
+    return _submit(db, "import", {"filename": file.filename}, base64.b64encode(data).decode())
 
 
 @router.get("")
@@ -184,8 +179,8 @@ def cancel_job(job_id: int, db: Session = Depends(get_db), user: User = Depends(
         job.error = "Cancelled before it started"
         job.finished_at = utcnow()
     elif job.status == "running":
-        # Handlers are synchronous, so cancellation is cooperative: the job stops at its next
-        # checkpoint (between crawled pages, for instance), not instantly.
+        # Handlers are synchronous, so cancellation is cooperative: the job stops at its
+        # next checkpoint (between crawled pages, for instance), not instantly.
         job.status = "cancelling"
     else:
         raise HTTPException(409, f"Job is already {job.status}")
@@ -203,6 +198,5 @@ def retry_job(job_id: int, db: Session = Depends(get_db), user: User = Depends(g
         raise HTTPException(
             409, f"Only failed or cancelled jobs can be retried (this one is {job.status})"
         )
-    if job.kind == "pdf":
-        raise HTTPException(409, "Re-upload the PDF instead — the temporary file is gone")
-    return _submit(db, job.kind, dict(job.params or {}))
+    # The payload travels with the job, so uploads retry like anything else.
+    return _submit(db, job.kind, dict(job.params or {}), job.payload)

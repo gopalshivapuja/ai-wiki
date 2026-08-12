@@ -1,13 +1,14 @@
 const API = '/api';
 const TOKEN_KEY = 'wiki_token';
 
-export const getToken = () => localStorage.getItem(TOKEN_KEY);
-export const setToken = (t: string) => localStorage.setItem(TOKEN_KEY, t);
-export const clearToken = () => localStorage.removeItem(TOKEN_KEY);
+let onUnauthorized: (() => void) | null = null;
 
-/** Fires whenever the token is gained or lost, so the nav can react without a reload. */
-export const AUTH_EVENT = 'wiki-auth-changed';
-const notifyAuthChange = () => window.dispatchEvent(new Event(AUTH_EVENT));
+/** AuthProvider registers here so a 401 anywhere can clear the session exactly once. */
+export const setUnauthorizedHandler = (fn: (() => void) | null) => {
+  onUnauthorized = fn;
+};
+
+export const getToken = () => localStorage.getItem(TOKEN_KEY);
 
 export class ApiError extends Error {
   status: number;
@@ -17,48 +18,86 @@ export class ApiError extends Error {
   }
 }
 
-function headers(extra?: HeadersInit): Record<string, string> {
-  const h: Record<string, string> = { 'Content-Type': 'application/json' };
-  const token = getToken();
-  if (token) h.Authorization = `Bearer ${token}`;
-  return { ...h, ...(extra as Record<string, string>) };
+/** Turn any FastAPI error body into something a human can read.
+ *
+ * Validation errors arrive as a *list* of objects, and res.statusText is empty over HTTP/2,
+ * so the naive version rendered "Request failed" — or, for the array, "[object Object]".
+ */
+function extractDetail(body: unknown, status: number): string {
+  const detail = (body as { detail?: unknown } | null)?.detail;
+  if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail)) {
+    return detail
+      .map((d: { loc?: unknown[]; msg?: string }) => {
+        const field = Array.isArray(d.loc) ? d.loc.slice(1).join('.') : '';
+        return field ? `${field}: ${d.msg}` : d.msg || 'invalid value';
+      })
+      .join('; ');
+  }
+  if (detail && typeof detail === 'object' && 'message' in detail) {
+    return String((detail as { message: unknown }).message);
+  }
+  return `Request failed (${status})`;
+}
+
+async function handleError(res: Response, path: string): Promise<never> {
+  const body = await res.json().catch(() => null);
+  // The login endpoint owns its own 401 — otherwise a wrong password reported
+  // "Login required" and logged you out of an existing session.
+  if (res.status === 401 && !path.startsWith('/auth/login')) {
+    localStorage.removeItem(TOKEN_KEY);
+    onUnauthorized?.();
+    throw new ApiError('Your session has expired. Please log in again.', 401);
+  }
+  throw new ApiError(extractDetail(body, res.status), res.status);
 }
 
 async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const token = getToken();
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...(options.headers as Record<string, string>),
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
+
   let res: Response;
   try {
-    res = await fetch(`${API}${path}`, { ...options, headers: headers(options.headers) });
+    res = await fetch(`${API}${path}`, { ...options, headers });
   } catch {
     throw new ApiError('Could not reach the server. Is it running?', 0);
   }
-
-  if (res.status === 401) {
-    clearToken();
-    notifyAuthChange();
-    throw new ApiError('Login required', 401);
-  }
-  if (!res.ok) {
-    const body = await res.json().catch(() => null);
-    const detail = body?.detail;
-    const message =
-      typeof detail === 'string' ? detail : detail?.message || res.statusText || 'Request failed';
-    throw new ApiError(message, res.status);
-  }
+  if (!res.ok) await handleError(res, path);
   if (res.status === 204) return undefined as T;
+  return res.json();
+}
+
+async function upload<T>(path: string, form: FormData): Promise<T> {
+  const token = getToken();
+  const res = await fetch(`${API}${path}`, {
+    method: 'POST',
+    body: form, // no Content-Type — the browser sets the multipart boundary
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+  });
+  if (!res.ok) await handleError(res, path);
   return res.json();
 }
 
 // --- types -------------------------------------------------------------------
 
-export type Kind = 'page' | 'source';
+export type DocClass = 'note' | 'source';
 
-export interface SearchResult {
-  score: number;
+export interface DocSummary {
   slug: string;
+  uid: string | null;
   title: string;
-  snippet: string;
+  doc_class: DocClass;
   type: string;
-  kind: Kind;
+  tags: string[];
+  url: string | null;
+  collection: string | null;
+  immutable: boolean;
+  created_at: string | null;
+  updated_at: string | null;
 }
 
 export interface WikiLink {
@@ -68,43 +107,33 @@ export interface WikiLink {
   exists: boolean;
 }
 
-export interface PageData {
-  slug: string;
-  uid: string | null;
-  title: string;
+export interface DocDetail extends DocSummary {
   body: string;
-  type: string;
-  tags: string[];
-  source_refs: string[];
-  created_at: string | null;
-  updated_at: string | null;
-  backlinks: { slug: string; title: string; type: string }[];
+  backlinks: { slug: string; title: string; type: string; doc_class: DocClass }[];
   links: WikiLink[];
+  derived_from: { slug: string; title: string } | null;
+  summary: { slug: string; title: string } | null;
+  revision_count: number;
 }
 
-export interface SourceData {
+export interface SearchResult {
+  score: number;
   slug: string;
   title: string;
+  snippet: string;
   type: string;
-  url: string | null;
-  collection: string | null;
-  body: string;
-  created_at: string | null;
-  summary_slug: string | null;
-}
-
-export interface SourceSummary {
-  slug: string;
-  title: string;
-  type: string;
-  url?: string | null;
-  collection?: string | null;
-  created_at?: string | null;
-  summary_slug: string | null;
+  doc_class: DocClass;
 }
 
 export interface GraphData {
-  nodes: { id: string; slug: string; title: string; type: string; link_count: number }[];
+  nodes: {
+    id: string;
+    slug: string;
+    title: string;
+    type: string;
+    doc_class: DocClass;
+    link_count: number;
+  }[];
   edges: { source: string; target: string }[];
 }
 
@@ -121,52 +150,37 @@ export interface Job {
   finished_at: string | null;
 }
 
-export interface ModelStatus {
-  configured: string[];
-  valid: string[];
-  invalid: string[];
-  usable_count: number;
-  will_use: string | null;
-  free_available: string[];
-  api_key_set: boolean;
-  catalogue_error: string | null;
+export interface Revision {
+  id: number;
+  title: string;
+  created_at: string | null;
+  preview: string;
 }
 
-export const ACTIVE_JOB_STATUSES = ['queued', 'running', 'cancelling'];
-export const isJobActive = (j: Job) => ACTIVE_JOB_STATUSES.includes(j.status);
+export interface ModelStatus {
+  invalid: string[];
+  usable_count: number;
+  free_available: string[];
+  api_key_set: boolean;
+}
 
-/** Where a search hit lives — pages and sources are separate namespaces. */
-export const hitPath = (r: { kind: Kind; slug: string }) =>
-  r.kind === 'source' ? `/source/${encodeURIComponent(r.slug)}` : `/wiki/${encodeURIComponent(r.slug)}`;
+export interface Stats {
+  total_notes: number;
+  total_sources: number;
+  zettels: number;
+  concepts: number;
+  entities: number;
+  literature: number;
+  mocs: number;
+  total_wikilinks: number;
+  avg_links_per_note: number;
+}
 
-// --- reads -------------------------------------------------------------------
+export const isJobActive = (j: Job) =>
+  j.status === 'queued' || j.status === 'running' || j.status === 'cancelling';
 
-export const searchWiki = (q: string, limit = 12) =>
-  api<{ results: SearchResult[] }>(`/search?q=${encodeURIComponent(q)}&limit=${limit}`);
-
-export const getPage = (slug: string) => api<PageData>(`/pages/${encodeURIComponent(slug)}`);
-
-export const listPages = (params: { type?: string; tag?: string } = {}) => {
-  const q = new URLSearchParams();
-  if (params.type) q.set('type', params.type);
-  if (params.tag) q.set('tag', params.tag);
-  const qs = q.toString();
-  return api<{ pages: { slug: string; title: string; type: string; tags: string[] }[] }>(
-    `/pages${qs ? `?${qs}` : ''}`,
-  );
-};
-
-export const getTags = () => api<{ tags: { tag: string; count: number }[] }>('/tags');
-export const getGraph = () => api<GraphData>('/graph');
-export const getStats = () => api<Record<string, number>>('/stats');
-export const getSource = (slug: string) => api<SourceData>(`/sources/${encodeURIComponent(slug)}`);
-export const getSources = (collection?: string) =>
-  api<{ sources: SourceSummary[] }>(
-    `/sources${collection ? `?collection=${encodeURIComponent(collection)}` : ''}`,
-  );
-export const getLog = () =>
-  api<{ entries: { action: string; summary: string; created_at: string }[] }>('/log');
-export const getModelStatus = () => api<ModelStatus>('/llm/models');
+/** One namespace, so one path. */
+export const docPath = (slug: string) => `/doc/${encodeURIComponent(slug)}`;
 
 // --- auth --------------------------------------------------------------------
 
@@ -175,46 +189,90 @@ export const login = async (email: string, password: string) => {
     method: 'POST',
     body: JSON.stringify({ email, password }),
   });
-  setToken(data.access_token);
-  notifyAuthChange();
+  localStorage.setItem(TOKEN_KEY, data.access_token);
   return data;
 };
 
-export const logout = () => {
-  clearToken();
-  notifyAuthChange();
+export const logout = () => localStorage.removeItem(TOKEN_KEY);
+export const me = () => api<{ email: string }>('/auth/me');
+
+// --- documents ---------------------------------------------------------------
+
+export const searchWiki = (q: string, limit = 12, includeSources = true) =>
+  api<{ results: SearchResult[] }>(
+    `/search?q=${encodeURIComponent(q)}&limit=${limit}&include_sources=${includeSources}`,
+  );
+
+export const listDocs = (params: {
+  doc_class?: DocClass;
+  type?: string;
+  tag?: string;
+  collection?: string;
+} = {}) => {
+  const q = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) if (v) q.set(k, v);
+  const qs = q.toString();
+  return api<{ documents: DocSummary[] }>(`/documents${qs ? `?${qs}` : ''}`);
 };
 
-export const me = () => api<{ email: string; role: string }>('/auth/me');
+export const getDoc = (slug: string) => api<DocDetail>(`/documents/${encodeURIComponent(slug)}`);
 
-// --- writes ------------------------------------------------------------------
+export const createDoc = (body: { title: string; body?: string; type?: string; tags?: string[] }) =>
+  api<DocSummary>('/documents', { method: 'POST', body: JSON.stringify(body) });
 
-export const createZettel = (title: string, body?: string) =>
-  api<{ slug: string; title: string }>('/zettels', {
-    method: 'POST',
-    body: JSON.stringify({ title, body }),
-  });
-
-export const updatePage = (
+export const updateDoc = (
   slug: string,
   patch: { title?: string; body?: string; tags?: string[]; type?: string },
 ) =>
-  api<PageData>(`/pages/${encodeURIComponent(slug)}`, {
+  api<DocDetail>(`/documents/${encodeURIComponent(slug)}`, {
     method: 'PUT',
     body: JSON.stringify(patch),
   });
 
-export const deletePage = (slug: string) =>
-  api<void>(`/pages/${encodeURIComponent(slug)}`, { method: 'DELETE' });
+export const deleteDoc = (slug: string) =>
+  api<void>(`/documents/${encodeURIComponent(slug)}`, { method: 'DELETE' });
 
-export const deleteSource = (slug: string) =>
-  api<void>(`/sources/${encodeURIComponent(slug)}`, { method: 'DELETE' });
+export const getRevisions = (slug: string) =>
+  api<{ revisions: Revision[] }>(`/documents/${encodeURIComponent(slug)}/revisions`);
+
+export const restoreRevision = (slug: string, id: number) =>
+  api<DocDetail>(`/documents/${encodeURIComponent(slug)}/restore/${id}`, { method: 'POST' });
+
+export const getTags = () => api<{ tags: { tag: string; count: number }[] }>('/tags');
+export const getGraph = (includeSources = true) =>
+  api<GraphData>(`/graph?include_sources=${includeSources}`);
+export const getOrphans = () =>
+  api<{ unlinked: { slug: string; title: string }[]; wanted: { target: string; mentions: number }[] }>(
+    '/orphans',
+  );
+export const getStats = () => api<Stats>('/stats');
+export const getLog = () =>
+  api<{ entries: { action: string; summary: string; created_at: string | null }[] }>('/log');
+export const getModelStatus = () => api<ModelStatus>('/llm/models');
 
 export const askLLM = (question: string) =>
-  api<{ answer: string; citations: { slug: string; title: string; kind: Kind }[] }>('/llm/query', {
-    method: 'POST',
-    body: JSON.stringify({ question }),
+  api<{ answer: string; citations: { slug: string; title: string; doc_class: DocClass }[] }>(
+    '/llm/query',
+    { method: 'POST', body: JSON.stringify({ question }) },
+  );
+
+/** Download the whole wiki as a zip. The only copy that isn't in the database. */
+export const exportUrl = () => `${API}/export`;
+
+export const downloadExport = async () => {
+  const token = getToken();
+  const res = await fetch(exportUrl(), {
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
   });
+  if (!res.ok) await handleError(res, '/export');
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `ai-wiki-${new Date().toISOString().slice(0, 10)}.zip`;
+  a.click();
+  URL.revokeObjectURL(url);
+};
 
 // --- jobs --------------------------------------------------------------------
 
@@ -224,39 +282,31 @@ const job = (path: string, body: unknown) =>
 export const ingestWeb = (url: string, summarize = true) => job('/web', { url, summarize });
 export const ingestArxiv = (id_or_url: string) => job('/arxiv', { id_or_url });
 export const ingestYoutube = (url: string, summarize = true) => job('/youtube', { url, summarize });
-export const transcribeUrl = (url: string, summarize = true) => job('/transcribe', { url, summarize });
+export const transcribeUrl = (url: string, summarize = true) =>
+  job('/transcribe', { url, summarize });
 export const crawlSite = (body: {
   url: string;
   max_pages?: number;
   max_depth?: number;
+  collection?: string;
   summarize?: boolean;
 }) => job('/crawl', body);
 export const pasteText = (title: string, text: string, summarize = false) =>
   job('/paste', { title, text, summarize });
 export const summarizeSource = (source_slug: string) => job('/summarize', { source_slug });
 
-export const uploadPdf = async (file: File, title?: string, summarize = true) => {
+export const uploadPdf = (file: File, title?: string, summarize = true) => {
   const form = new FormData();
   form.append('file', file);
   if (title) form.append('title', title);
   form.append('summarize', String(summarize));
+  return upload<Job>('/jobs/pdf', form);
+};
 
-  const token = getToken();
-  const res = await fetch(`${API}/jobs/pdf`, {
-    method: 'POST',
-    body: form, // no Content-Type — the browser sets the multipart boundary
-    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-  });
-  if (res.status === 401) {
-    clearToken();
-    notifyAuthChange();
-    throw new ApiError('Login required', 401);
-  }
-  if (!res.ok) {
-    const body = await res.json().catch(() => null);
-    throw new ApiError(body?.detail || 'Upload failed', res.status);
-  }
-  return (await res.json()) as Job;
+export const importArchive = (file: File) => {
+  const form = new FormData();
+  form.append('file', file);
+  return upload<Job>('/jobs/import', form);
 };
 
 export const listJobs = (limit = 25) => api<{ jobs: Job[] }>(`/jobs?limit=${limit}`);

@@ -1,36 +1,47 @@
-"""Knowledge graph from database pages."""
+"""Knowledge graph and statistics over documents."""
 
 from __future__ import annotations
 
 from sqlalchemy.orm import Session
 from wiki_core.utils import WIKILINK_RE, parse_wikilinks
 
-from wiki_api.database import Page, RawSource
-from wiki_api.services.content import build_slug_index
+from wiki_api.database import NOTE, SOURCE, Document
+from wiki_api.services.content import build_link_index
 
 
-def build_graph(db: Session) -> dict:
-    index = build_slug_index(db)
-    rows = db.query(Page.slug, Page.title, Page.page_type, Page.body).all()
+def build_graph(db: Session, include_sources: bool = True) -> dict:
+    index = build_link_index(db)
+    q = db.query(Document.slug, Document.title, Document.subtype, Document.doc_class, Document.body)
+    if not include_sources:
+        q = q.filter(Document.doc_class != SOURCE)
+    rows = q.all()
 
     nodes = [
-        {"id": slug, "slug": slug, "title": title, "type": ptype, "link_count": 0}
-        for slug, title, ptype, _ in rows
+        {
+            "id": slug,
+            "slug": slug,
+            "title": title,
+            "type": subtype,
+            "doc_class": doc_class,
+            "link_count": 0,
+        }
+        for slug, title, subtype, doc_class, _ in rows
     ]
 
+    known = {slug for slug, _, _, _, _ in rows}
     edges: list[dict] = []
-    seen_edges: set[tuple[str, str]] = set()
-    degree: dict[str, int] = {slug: 0 for slug, _, _, _ in rows}
+    seen: set[tuple[str, str]] = set()
+    degree: dict[str, int] = dict.fromkeys(known, 0)
 
-    for slug, _, _, body in rows:
+    for slug, _, _, _, body in rows:
         for link in parse_wikilinks(body or ""):
             target = index.resolve(link.target)
-            if not target or target == slug or target not in degree:
+            if not target or target == slug or target not in known:
                 continue
             key = (slug, target)
-            if key in seen_edges:
+            if key in seen:
                 continue
-            seen_edges.add(key)
+            seen.add(key)
             edges.append({"source": slug, "target": target})
             degree[slug] += 1
             degree[target] += 1
@@ -41,18 +52,52 @@ def build_graph(db: Session) -> dict:
     return {"nodes": nodes, "edges": edges}
 
 
+def orphans(db: Session) -> dict:
+    """Notes nothing links to, and links pointing at notes that do not exist yet.
+
+    The Zettelkasten invariant every note is supposed to satisfy — without this the graph
+    quietly degrades into a folder of disconnected files.
+    """
+    index = build_link_index(db)
+    rows = db.query(Document.slug, Document.title, Document.doc_class, Document.body).all()
+
+    linked_to: set[str] = set()
+    missing: dict[str, int] = {}
+    for slug, _, _, body in rows:
+        for link in parse_wikilinks(body or ""):
+            target = index.resolve(link.target)
+            if target and target != slug:
+                linked_to.add(target)
+            elif not target:
+                missing[link.target.strip()] = missing.get(link.target.strip(), 0) + 1
+
+    unlinked = [
+        {"slug": slug, "title": title}
+        for slug, title, doc_class, _ in rows
+        if doc_class == NOTE and slug not in linked_to
+    ]
+    wanted = [
+        {"target": t, "mentions": c}
+        for t, c in sorted(missing.items(), key=lambda kv: (-kv[1], kv[0]))
+    ]
+    return {"unlinked": unlinked, "wanted": wanted}
+
+
 def stats(db: Session) -> dict:
-    rows = db.query(Page.page_type, Page.body).all()
-    total_links = sum(len(WIKILINK_RE.findall(body or "")) for _, body in rows)
-    types = [ptype for ptype, _ in rows]
+    rows = db.query(Document.doc_class, Document.subtype, Document.body).all()
+    notes = [(s, b) for c, s, b in rows if c == NOTE]
+    sources = [s for c, s, _ in rows if c == SOURCE]
+    total_links = sum(len(WIKILINK_RE.findall(b or "")) for _, b in notes)
+    subtypes = [s for s, _ in notes]
+
     return {
-        "total_pages": len(rows),
-        "total_sources": db.query(RawSource).count(),
-        "zettels": types.count("zettel"),
-        "concepts": types.count("concept"),
-        "entities": types.count("entity"),
-        "literature": sum(1 for t in types if t in ("literature", "source")),
-        "mocs": types.count("moc"),
+        "total_notes": len(notes),
+        "total_sources": len(sources),
+        "zettels": subtypes.count("zettel"),
+        "concepts": subtypes.count("concept"),
+        "entities": subtypes.count("entity"),
+        "literature": subtypes.count("literature"),
+        "mocs": subtypes.count("moc"),
         "total_wikilinks": total_links,
-        "avg_links_per_page": round(total_links / len(rows), 2) if rows else 0,
+        "avg_links_per_note": round(total_links / len(notes), 2) if notes else 0,
     }

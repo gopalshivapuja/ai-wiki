@@ -52,14 +52,14 @@ next boot with a Retry button, so nothing is silently lost — but it is avoidab
 
 ```bash
 curl https://YOUR-APP.up.railway.app/health
-# {"status":"ok","version":"0.3.0"}
+# {"status":"ok","version":"0.4.0"}
 
 curl https://YOUR-APP.up.railway.app/api/stats
 # total_pages must be > 0 — if it is 0, the seed data did not load; check the deploy logs
 # for "Seed data not found under ...".
 ```
 
-## What it costs
+## What it costs (rates as of 2026-08)
 
 Railway bills **measured per-minute usage, not allocated limits**: RAM $10/GB/month, vCPU
 $20/vCPU/month, volume $0.15/GB/month, egress $0.05/GB. The Hobby plan is $5/month
@@ -106,9 +106,9 @@ A healthy first boot logs, in order:
 ```
 Database reachable after N attempts     (only when it had to wait)
 Created admin user <your email>
-schema_ddl: applied 8/8 statements
-Seeded 20 pages and 2 sources from /app
-Job runner started with 2 worker(s)
+schema_ddl: applied N/N statements      (both numbers must match)
+Seeded N documents from /app/seed       (N must be > 0)
+Job runner started
 ```
 
 ## Known limitations on Railway
@@ -129,3 +129,12 @@ already-stored sources are skipped.
 cp .env.example .env
 docker compose up --build
 ```
+
+## Back up your notes
+
+The database is the only live copy. **Add source → Backup → Download everything** gives you a zip of
+plain markdown that any editor can read and that this app can re-import — so a lapsed plan, a
+mistaken delete, or a decision to move elsewhere never costs you your notes.
+
+Do it after any substantial writing session. There is no automatic off-site backup; Railway's own
+database backups depend on your plan.

@@ -4,128 +4,144 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project scope
 
-`ai-wiki` is a standalone web app (FastAPI + React + PostgreSQL) implementing an LLM Wiki /
-Zettelkasten knowledge base. It is an independent repo (`github.com/gopalshivapuja/ai-wiki`) and is
-**not** part of the file-based personal vault at `/Users/gopal/Wiki` — do not apply that vault's
-`CLAUDE.md` conventions here, and do not re-nest this repo inside it.
+`ai-wiki` is a private, single-user knowledge base: FastAPI + React + PostgreSQL, deployed as one
+container on Railway. It is an independent repo (`github.com/gopalshivapuja/ai-wiki`) and is **not**
+part of the file-based vault at `/Users/gopal/Wiki` — do not apply that vault's conventions here.
 
-`AGENTS.md` defines the content schema (zettel taxonomy, frontmatter, wikilink conventions) and the
-HTTP API surface. There is no CLI.
+Run commands live in [README.md](./README.md). The API documents itself at `/docs`; do not maintain a
+hand-written endpoint list anywhere, it will drift.
 
-## Commands
+## The data model
 
-The frontend must be built before the backend can serve the SPA.
+**One table, `documents`, holds everything.** A row is either a note (`doc_class="note"` — anything
+you or the AI wrote) or a captured source (`doc_class="source"` — web page, PDF, transcript, paste).
+`subtype` is the vocabulary within each: `zettel|concept|entity|moc|synthesis|literature|page|index`
+for notes, `web|pdf|youtube|audio|arxiv|note` for sources.
 
-```bash
-# Full stack (Postgres + app on :8000)
-cp .env.example .env
-docker compose up --build
+This was two tables with two slug namespaces. That split leaked a `kind` discriminator into ~35
+places, required two search implementations and two REST resources, and — the reason it had to go —
+made it structurally impossible for a wikilink to resolve to a source. Consequences of the current
+design, all load-bearing:
 
-# Local backend against SQLite
-pip install -e ".[dev]"
-DATABASE_URL=sqlite:///./wiki.db JWT_SECRET=dev uvicorn wiki_api.app:app --reload
+- **One slug namespace.** Ingested sources are prefixed `src-`. Do not reintroduce a second
+  namespace; `summary_slug()`, `protect_curated`, `url_hash` disambiguation and a dict-shaped 404 all
+  existed only to manage the old collision.
+- **`derived_from_id`** links a literature note to its source. A real foreign key, not a naming
+  convention. `upsert_literature_note()` uses it to update the right note instead of guessing.
+- **`immutable`** marks captured material. `update_note()` raises `Immutable` → HTTP 409.
+- Sources appear in search, the graph, backlinks and red-link detection exactly like notes.
 
-# Frontend dev server (proxies /api and /health to :8000)
-cd apps/web && npm install && npm run dev     # :5173
-cd apps/web && npm run build                  # backend serves apps/web/dist automatically
+`Revision` snapshots a document before every content change (`_snapshot()` in `content.py`). Nothing
+else protects against a bad edit or an AI rewrite.
 
-# Tests — run BOTH; they cover different code paths
-DATABASE_URL=sqlite:////tmp/wiki_test.db JWT_SECRET=test pytest tests/ -v
-DATABASE_URL=postgresql://user@localhost:5432/wiki_test JWT_SECRET=test pytest tests/ -v
-DATABASE_URL=sqlite:////tmp/wiki_test.db JWT_SECRET=test pytest tests/test_wiki.py::test_search -v
+## Durability — treat this as a hard requirement
 
-ruff check . && ruff format packages tests
-```
+`GET /api/export` streams a zip of markdown-with-frontmatter; `POST /api/jobs/import` reads the same
+format. That single format is backup, restore, Obsidian interop **and first-boot seeding** —
+`seed_if_empty()` is an ordinary caller of `import_markdown()`, not separate boot-time magic.
+
+If you change how documents are stored, change `to_markdown()` and `import_markdown()` together, and
+keep `test_export_import_round_trip` passing. A knowledge base whose only copy is one hobby-tier
+database is not something to ship.
 
 ## Architecture
 
-**PostgreSQL is the single source of truth.** The markdown under `wiki/` and `sources/` is seed data
-only: `seed_if_empty()` imports it once, when the database is empty. Editing those files has no
-effect on a seeded database, and content created in the app never writes back to disk.
-
-`WIKI_SEED_DIR` must point at the directory containing `wiki/` and `sources/`. The Dockerfile sets it
-to `/app`. Without it the seeder resolves relative to its own module path, which lands in
-site-packages after a non-editable `pip install .` — that silently seeded nothing in production, and
-editable installs hide it, so **the Docker smoke test in CI is what guards this**.
-
-Layout:
-- `packages/wiki_api/` — FastAPI app, routes, auth, models, `services/`, `jobs/`.
-- `packages/wiki_core/` — dependency-light helpers: `utils.py` (slugify, wikilink and frontmatter
+- `packages/wiki_api/` — `app.py` (lifespan, SPA), `database.py` (ORM models), `routes.py`,
+  `routes_jobs.py`, `auth.py`, `startup.py`, `schema_ddl.py`, `services/`, `jobs/`.
+- `packages/wiki_core/` — dependency-light helpers: `utils.py` (slugify, wikilink/frontmatter
   parsing), `llm.py` (OpenRouter). No DB imports; keep it that way.
-- `apps/web/` — React 18 + Vite SPA.
+- `apps/web/` — React 18 + Vite. `hooks.ts` holds `useAsync` / `usePoll` / `useSearch`; use them
+  rather than hand-rolling another fetch-plus-loading-plus-error triple (none of the hand-rolled ones
+  guarded against out-of-order responses).
+- `seed/` — starter content in the export format. Not read after first boot.
 
-### Data model
+### Boot sequence (`app.py::lifespan`) — the order is load-bearing
 
-Five tables (`database.py`): `Page`, `RawSource`, `User`, `ActivityLog`, `Job`.
+`check_secrets()` → `wait_for_database()` → `init_db()` (`create_all`) → `apply_schema_ddl()` →
+`seed_if_empty()` → `JobRunner.start()`.
 
-`Page` and `RawSource` are **separate slug namespaces that can legitimately collide** — the same
-material can be both a captured source and a curated note. Consequences to respect:
-- Search returns a `kind` discriminator (`"page"` / `"source"`); the frontend routes to `/wiki/:slug`
-  or `/source/:slug` accordingly. Do not drop it.
-- AI summaries go to `summary_slug(source_slug)`, never the source's own slug.
-- Automated writers pass `upsert_page(..., protect_curated=True)`, which refuses to overwrite a
-  hand-written page of a different type.
-- `upsert_source` never mutates an existing row and returns `(source, created)`. A different URL that
-  slugifies identically gets a hash suffix.
+`wait_for_database` retries with backoff because the app and database containers start together.
+`check_secrets` refuses to boot a hosted deployment still using the built-in `JWT_SECRET`.
 
 ### Schema changes
 
-**No Alembic.** New tables come from `Base.metadata.create_all()`; new columns and indexes on
-existing tables go in `schema_ddl.py::PG_STATEMENTS`, which runs additive, idempotent DDL at every
-boot and no-ops on SQLite. Boot order in `lifespan` is load-bearing: `init_db()` → `apply_schema_ddl()`
-→ `seed_if_empty()`.
+**No Alembic.** New tables come from `create_all()`; anything SQLAlchemy cannot express goes in
+`schema_ddl.py::PG_STATEMENTS`, which must stay additive and idempotent. It currently holds the
+generated `search_tsv` column and the GIN indexes. Failures there are fatal by design — a boot that
+warns and then serves broken search is worse than one that stops.
 
-Adopt Alembic when you need a column rename/type change/drop, a data backfill a generated column
-cannot express, more than one replica (two containers would race the DDL), or the tables grow large
-enough that `ADD COLUMN`'s brief `ACCESS EXCLUSIVE` lock outlasts the healthcheck.
+Adopt Alembic when you need a rename/drop/type change, a backfill a generated column cannot express,
+more than one steady-state replica, or tables large enough that `ADD COLUMN`'s lock outlasts the
+healthcheck.
 
 ### Search
 
-`services/search.py` is a dispatcher: PostgreSQL FTS when the dialect is `postgresql`, the pure-Python
-BM25 in `search_bm25.py` otherwise (and as a fallback if FTS raises, e.g. before the columns exist).
-Both must return the identical dict shape — CI's SQLite run only exercises the fallback.
+PostgreSQL full-text only, in `services/search.py`. There is deliberately no second implementation:
+the old BM25 fallback ranked differently and silently masked failures in the real one.
 
-The Postgres path uses generated `search_tsv` columns and GIN indexes. Two non-obvious constraints:
-`to_tsvector` must take the explicit `'english'` argument (the one-arg form is not `IMMUTABLE` and is
-rejected in a generated column), and the input is capped by `left(body, 400000)` because a tsvector
-over 1MB aborts the `INSERT` — that would break ingest, not just search.
+Two non-obvious constraints: `to_tsvector` must take the explicit `'english'` argument (the one-arg
+form is not `IMMUTABLE` and Postgres rejects it in a generated column), and input is capped by
+`left(body, 400000)` because a tsvector over 1MB aborts the `INSERT` — that breaks *ingest*, not just
+search. `ts_headline` runs only over rows that survived `LIMIT`; it cannot use the index.
 
-### Links and graph
+### Links
 
-Never resolve wikilinks in a loop with `resolve_slug` — it re-queries per call. Build a `SlugIndex`
-once with `build_slug_index(db)` and use `.resolve()`. Resolution order is slug → uid → `slugify(target)`.
+Never resolve wikilinks in a loop with per-link queries. Build one `LinkIndex` with
+`build_link_index(db)` and call `.resolve()`. Resolution order: exact slug → uid → `slugify(target)` →
+`src-`-prefixed → case-folded title.
 
 ### Background jobs
 
-Long ingests cannot run in a request (the Railway proxy times out). `jobs/runner.py` is a DB-backed
-queue drained by asyncio workers started in `lifespan`; the `jobs` table is the source of truth so a
-redeploy cannot lose work. Handlers in `jobs/handlers.py` are **plain sync functions** run whole in a
-worker thread via `anyio.to_thread.run_sync` with a dedicated `CapacityLimiter` — a sync SQLAlchemy
-session must stay on one thread, and the separate limiter keeps jobs from starving request threads.
+`jobs/runner.py` is a DB-backed queue drained by **one** asyncio worker. The `jobs` table is the
+source of truth so a redeploy loses nothing.
 
-- Background code must use `session_scope()`, never the request-scoped `get_db` session.
-- Cancellation is cooperative: handlers stop at the next `ctx.check_stop()`/`should_stop()` checkpoint.
-- Jobs left `running` by a crash are marked failed at boot (`reap_orphans`), not retried automatically.
+- Handlers in `jobs/handlers.py` take `(params, ctx)` and **own their sessions** — open
+  `session_scope()` only around database work. Passing a session in meant a transcription held a
+  pooled connection for ten minutes and lost the result if it dropped.
+- Handlers are plain sync functions run whole in a worker thread; a sync `Session` must stay on one
+  thread.
+- `reap_orphans()` assumes exactly one runner process and filters on `started_at` so a booting
+  container cannot kill the outgoing one's work. **Do not run `--workers > 1`** without giving jobs an
+  owner id; set `JOB_RUNNER_ENABLED=0` for any extra web-only process.
+- Cancellation is cooperative: handlers stop at the next `ctx.should_stop()`.
+- Upload bytes travel in `Job.payload`, not on ephemeral disk, so retry works across a redeploy.
 
 ### Serving and security
 
 One process. `app.py` registers a `/{full_path:path}` SPA catch-all, so **any new API route must live
 under `/api`** or the catch-all swallows it. The catch-all resolves paths and verifies they stay
-inside `STATIC_DIR`; do not remove that check.
+inside `STATIC_DIR` — do not remove that check.
 
-All outbound fetches of user-supplied URLs go through `services/fetch.py`, which enforces an
-http(s)-only scheme allowlist, blocks private/loopback/link-local addresses, and caps response size.
-Never call `urllib.request.urlopen` on user input directly.
+Every outbound fetch of a user-supplied URL goes through `services/fetch.py`: http(s) only, private
+and link-local addresses blocked, response size capped. Never call `urllib.request.urlopen` on user
+input directly.
 
-Auth split: reads are public; writes, ingest, LLM calls and raw source text require
-`Depends(get_current_user)`. Anonymous search passes `include_sources=False` so it cannot leak source
-material that `/api/sources` gates.
+**The wiki is private.** Every route requires a token. There is no public/private split by document
+class — literature notes reproduce the substance of the sources they summarise, so that split
+protected nothing.
+
+Auth is one admin from the environment. `_ensure_admin()` re-syncs the password from
+`ADMIN_PASSWORD` on every boot, which is why there is no signup and no in-app password change — they
+would be reverted. Changing `ADMIN_EMAIL` creates a *second* admin and leaves the first usable.
 
 ## Conventions
 
-- Ingest and page-mutating logic belongs in `services/`; `routes.py` stays thin — Pydantic bodies plus
-  status mapping. Map `ValueError`/`FetchError` to 4xx; do not let internal errors reach the client.
-- Every mutation calls `log_action(db, action, summary)`, which backs `/api/log`.
-- Use `utcnow()` from `database.py`, not the deprecated `datetime.utcnow()`.
+- Ingest and mutation logic belongs in `services/`; `routes.py` stays thin — Pydantic bodies plus
+  `_fail()` for status mapping (`Immutable`→409, `ValueError`/`FetchError`→400, `LLMNotConfigured`→503).
+- Every ingest path goes through `content.store_source()`, so none can forget to log or to mark the
+  result immutable.
+- Creates, edits, deletes, ingests and imports call `log_action()`; it backs `/api/log`.
+- Use `utcnow()` from `database.py`, never `datetime.utcnow()`.
 - Do not hardcode OpenRouter model ids anywhere. `llm.py` validates against the live catalogue and
-  falls back to a discovered free model; `GET /api/llm/models` reports the resolution.
+  falls back to a discovered free model; `GET /api/llm/models` reports what it chose.
+- Frontend errors go through `extractDetail()` in `api.ts` — FastAPI's 422 `detail` is a *list*, and
+  `res.statusText` is empty over HTTP/2.
+
+## Tests
+
+One file, `tests/test_wiki.py`, against real PostgreSQL. They are chosen by risk, not coverage: the
+seed actually imports, sources are link targets, the export round-trips, `reap_orphans` spares fresh
+jobs, the SPA is served, SSRF and traversal are blocked, and the crawler fetches each page once.
+
+`test_every_env_var_is_documented` fails the build when a new `os.environ.get` is missing from
+`.env.example`. Keep it that way — the docs drifted badly before it existed.

@@ -1,19 +1,14 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import {
-  askLLM,
-  createZettel,
-  getModelStatus,
-  hitPath,
-  type Kind,
-  type ModelStatus,
-} from './api';
+import { askLLM, createDoc, docPath, getModelStatus, type DocClass } from './api';
+import { useAsync } from './hooks';
 import { Markdown } from './Markdown';
 
 interface Answer {
+  id: number;
   question: string;
   answer: string;
-  citations: { slug: string; title: string; kind: Kind }[];
+  citations: { slug: string; title: string; doc_class: DocClass }[];
 }
 
 export function AskPage() {
@@ -21,12 +16,8 @@ export function AskPage() {
   const [history, setHistory] = useState<Answer[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [models, setModels] = useState<ModelStatus | null>(null);
+  const { data: models } = useAsync(() => getModelStatus(), []);
   const navigate = useNavigate();
-
-  useEffect(() => {
-    getModelStatus().then(setModels).catch(() => setModels(null));
-  }, []);
 
   const ask = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -36,7 +27,7 @@ export function AskPage() {
     setError(null);
     try {
       const res = await askLLM(q);
-      setHistory((h) => [{ question: q, ...res }, ...h]);
+      setHistory((h) => [{ id: Date.now(), question: q, ...res }, ...h]);
       setQuestion('');
     } catch (err) {
       setError((err as Error).message);
@@ -50,7 +41,7 @@ export function AskPage() {
       const body = `# ${a.question}\n\n${a.answer}\n\n## Sources\n\n${a.citations
         .map((c) => `- [[${c.slug}|${c.title}]]`)
         .join('\n')}\n`;
-      const created = await createZettel(a.question.slice(0, 120), body);
+      const created = await createDoc({ title: a.question.slice(0, 120), body, type: 'zettel' });
       navigate(`/edit/${encodeURIComponent(created.slug)}`);
     } catch (err) {
       setError((err as Error).message);
@@ -63,7 +54,7 @@ export function AskPage() {
     <div className="container">
       <h1>Ask your wiki</h1>
       <p className="muted">
-        Answers come only from what you have added — with links to the notes they came from.
+        Answers come only from what you have added, with links to the notes they came from.
       </p>
 
       {misconfigured && (
@@ -85,7 +76,8 @@ export function AskPage() {
               {models.free_available.length > 0 && (
                 <>
                   {' '}
-                  Try setting <code>OPENROUTER_MODEL={models.free_available[0]}</code>.
+                  Try <code>OPENROUTER_MODEL={models.free_available[0]}</code>, or leave it unset to
+                  auto-select.
                 </>
               )}
             </p>
@@ -98,6 +90,7 @@ export function AskPage() {
           value={question}
           onChange={(e) => setQuestion(e.target.value)}
           placeholder="What does the transformer paper say about attention?"
+          aria-label="Your question"
           maxLength={2000}
           autoFocus
         />
@@ -113,16 +106,18 @@ export function AskPage() {
         </div>
       )}
 
-      {history.map((a, i) => (
-        <section className="panel ask-answer" key={i}>
+      {history.map((a) => (
+        <section className="panel ask-answer" key={a.id}>
           <h2>{a.question}</h2>
           <Markdown
             content={a.answer}
+            // Citations are real documents, so they render as working links rather than
+            // the greyed-out dead links sources used to get.
             links={a.citations.map((c) => ({
               target: c.slug,
               slug: c.slug,
               display: c.title,
-              exists: c.kind === 'page',
+              exists: true,
             }))}
           />
           {a.citations.length > 0 && (
@@ -130,9 +125,9 @@ export function AskPage() {
               <h3>Sources</h3>
               <ul>
                 {a.citations.map((c) => (
-                  <li key={`${c.kind}:${c.slug}`}>
-                    <Link to={hitPath(c)}>{c.title}</Link>
-                    <span className="badge">{c.kind}</span>
+                  <li key={c.slug}>
+                    <Link to={docPath(c.slug)}>{c.title}</Link>
+                    <span className="badge">{c.doc_class}</span>
                   </li>
                 ))}
               </ul>
