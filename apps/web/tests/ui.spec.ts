@@ -68,8 +68,9 @@ test.describe('wiki navigation', () => {
       context.waitForEvent('page'),
       link.click({ modifiers: [process.platform === 'darwin' ? 'Meta' : 'Control'] }),
     ]);
-    await newPage.waitForLoadState('domcontentloaded');
-    expect(newPage.url()).toBe(`${BASE}${href}`);
+    // A new tab starts at about:blank and navigates a moment later, which is visible over a
+    // real network even though it is instant locally.
+    await newPage.waitForURL(`${BASE}${href}`, { timeout: 15_000 });
     // The original tab stays where it was.
     expect(page.url()).toBe(`${BASE}/doc/index`);
   });
