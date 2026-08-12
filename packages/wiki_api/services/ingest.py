@@ -134,6 +134,43 @@ def extract_video_id(url_or_id: str) -> str:
     raise FetchError(f"Could not find a YouTube video id in: {url_or_id}")
 
 
+def list_channel_videos(url: str, limit: int | None = None) -> list[dict]:
+    """List a channel or playlist without downloading anything.
+
+    Metadata only — each video is then ingested through the normal captions path, so one
+    failure does not take the batch with it.
+    """
+    import yt_dlp
+
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "extract_flat": "in_playlist",
+        "skip_download": True,
+        "socket_timeout": 30,
+    }
+    if limit:
+        opts["playlistend"] = limit
+
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+
+    entries = info.get("entries") or []
+    out = []
+    for e in entries:
+        vid = e.get("id")
+        if not vid or len(vid) != 11:
+            continue
+        out.append(
+            {
+                "id": vid,
+                "title": e.get("title") or vid,
+                "duration": e.get("duration"),
+            }
+        )
+    return out
+
+
 def fetch_youtube_metadata(vid: str) -> dict:
     meta_url = (
         f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={vid}&format=json"

@@ -500,3 +500,105 @@ def test_literature_note_slug_is_clean(client, auth):
         delete_doc(db, note.slug)
         delete_doc(db, src.slug)
         assert get_doc(db, note.slug) is None
+
+
+# --- distillation -------------------------------------------------------------
+
+
+def test_concept_names_are_normalised_for_convergence():
+    """The same idea written three ways must reach one note."""
+    from wiki_api.services.distill import _normalise
+
+    assert _normalise("Cross-Entropy Loss") == _normalise("cross entropy")
+    assert _normalise("Attention (Bahdanau)") == _normalise("attention")
+    assert _normalise("Backpropagation") != _normalise("Forward Pass")
+
+
+def test_find_existing_converges_via_alias_and_title(client, auth):
+    """A concept met under an abbreviation must find the note that already covers it."""
+    from wiki_api.database import session_scope
+    from wiki_api.services.content import build_link_index, create_note, delete_doc
+    from wiki_api.services.distill import Concept, find_existing
+
+    with session_scope() as db:
+        note = create_note(db, "Multi-Head Attention Mechanism", "body", subtype="zettel")
+        note.extra = {"aliases": ["MHA"]}
+        db.commit()
+        index = build_link_index(db)
+
+        by_alias = find_existing(db, index, Concept(name="MHA"))
+        by_title = find_existing(db, index, Concept(name="multi head attention mechanism"))
+        unrelated = find_existing(db, index, Concept(name="Kalman Filtering"))
+
+        assert by_alias == note.slug
+        assert by_title == note.slug
+        assert unrelated is None
+        delete_doc(db, note.slug)
+
+
+def test_extraction_rejects_junk_concepts():
+    """A model returning headings or sentences must not become notes."""
+    from wiki_api.services.distill import _concepts_from
+
+    data = {
+        "concepts": [
+            {"name": "Cross-Entropy Loss", "summary": "s", "why": "w", "aliases": ["CE"]},
+            {"name": "", "summary": "empty name"},
+            {"name": "x" * 200, "summary": "far too long to be a concept"},
+            {"name": "。。。", "summary": "nothing sluggable"},
+            "not even a dict",
+        ]
+    }
+    out = _concepts_from(data, limit=8)
+    assert [c.name for c in out] == ["Cross-Entropy Loss"]
+    assert out[0].aliases == ["CE"]
+
+
+def test_every_job_kind_queues_distillation(monkeypatch):
+    """The choke point: capture by any route must lead to linking.
+
+    Previously each handler decided for itself, so arXiv never summarised and crawl, paste
+    and import defaulted to off.
+    """
+    from wiki_api.jobs import runner
+
+    queued: list[dict] = []
+    monkeypatch.setattr(runner, "session_scope", lambda: __import__("contextlib").nullcontext(None))
+    monkeypatch.setattr(runner, "enqueue", lambda db, kind, params: queued.append(params))
+
+    for kind in ("web", "arxiv", "youtube", "crawl", "pdf", "paste", "transcribe"):
+        queued.clear()
+        runner._queue_distillation(kind, {}, {"sources": [f"src-{kind}"]})
+        assert [q["source_slug"] for q in queued] == [f"src-{kind}"], kind
+
+    # Explicitly opting out is still honoured, and distill jobs do not recurse.
+    queued.clear()
+    runner._queue_distillation("web", {"distill": False}, {"sources": ["src-x"]})
+    runner._queue_distillation("distill", {}, {"sources": ["src-y"]})
+    assert queued == []
+
+
+def test_reasoning_is_stripped_before_it_reaches_a_note():
+    """Nemotron models write their chain of thought as ordinary content."""
+    from wiki_core.llm import clean_output
+
+    assert clean_output("<think>plan</think>\n# Note\n\nBody.") == "# Note\n\nBody."
+    assert clean_output("Okay, the user wants a note.\n\n# Note\n\nBody.") == "# Note\n\nBody."
+    # A reply that is *only* preamble must not be emptied.
+    assert clean_output("We need to respond with ok") == "We need to respond with ok"
+
+
+def test_json_is_recovered_from_a_messy_reply():
+    from wiki_core.llm import extract_json
+
+    assert extract_json('```json\n{"concepts": []}\n```') == {"concepts": []}
+    assert extract_json('Sure! {"a": 1} hope that helps') == {"a": 1}
+    assert extract_json("no json here") is None
+
+
+def test_slugify_treats_separators_as_word_breaks():
+    """"Vanishing/Exploding" was slugging to "vanishingexploding"."""
+    from wiki_core.utils import slugify
+
+    assert slugify("Vanishing/Exploding Gradients") == "vanishing-exploding-gradients"
+    assert slugify("Q, K & V") == "q-k-v"

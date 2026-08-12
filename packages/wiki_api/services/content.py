@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 from wiki_core.utils import parse_frontmatter, parse_wikilinks, slugify
 
 from wiki_api.database import NOTE, SOURCE, ActivityLog, Document, Revision, utcnow
@@ -154,6 +154,9 @@ class LinkIndex:
     by_uid: dict[str, str]
     by_title: dict[str, str]
     title_of: dict[str, str]
+    # slug -> alternative names for the same idea, so "MHA" reaches "Multi-Head Attention".
+    aliases_of: dict[str, list[str]]
+    by_alias: dict[str, str]
 
     def resolve(self, target: str) -> str | None:
         t = target.strip()
@@ -168,16 +171,28 @@ class LinkIndex:
         prefixed = f"{SOURCE_PREFIX}{slugged}"
         if prefixed in self.by_slug:
             return prefixed
-        return self.by_title.get(t.casefold())
+        by_title = self.by_title.get(t.casefold())
+        if by_title:
+            return by_title
+        return self.by_alias.get(t.casefold())
 
 
 def build_link_index(db: Session) -> LinkIndex:
-    rows = db.query(Document.slug, Document.uid, Document.title).all()
+    rows = db.query(Document.slug, Document.uid, Document.title, Document.extra).all()
+    aliases_of = {
+        slug: [str(a) for a in (extra or {}).get("aliases", []) if str(a).strip()]
+        for slug, _, _, extra in rows
+    }
+    aliases_of = {slug: names for slug, names in aliases_of.items() if names}
     return LinkIndex(
-        by_slug={slug: slug for slug, _, _ in rows},
-        by_uid={uid: slug for slug, uid, _ in rows if uid},
-        by_title={title.casefold(): slug for slug, _, title in rows if title},
-        title_of={slug: title for slug, _, title in rows},
+        by_slug={slug: slug for slug, _, _, _ in rows},
+        by_uid={uid: slug for slug, uid, _, _ in rows if uid},
+        by_title={title.casefold(): slug for slug, _, title, _ in rows if title},
+        title_of={slug: title for slug, _, title, _ in rows},
+        aliases_of=aliases_of,
+        by_alias={
+            alias.casefold(): slug for slug, names in aliases_of.items() for alias in names
+        },
     )
 
 
@@ -415,6 +430,18 @@ def upsert_literature_note(
         .filter(Document.derived_from_id == source.id, Document.subtype == "literature")
         .first()
     )
+    if existing is None:
+        # Imported or seeded notes have no derived_from_id, which is how a second summary
+        # got created for a source that already had one. Adopt the existing note instead.
+        stem = source.slug.removeprefix(SOURCE_PREFIX)
+        for candidate in (f"summary-{stem}"[:MAX_SLUG_LEN], stem):
+            found = get_doc(db, candidate)
+            if found and found.doc_class == NOTE:
+                found.derived_from_id = source.id
+                found.subtype = "literature"
+                db.commit()
+                existing = found
+                break
     if existing:
         _snapshot(db, existing)
         existing.title = title
@@ -473,10 +500,18 @@ def import_markdown(db: Session, path: Path, subtype_hint: str | None = None) ->
     if not slug:
         return None
 
+    source_ref = fm.get("source")
+    derived_from_id = None
+    if source_ref:
+        src = get_doc(db, str(source_ref))
+        derived_from_id = src.id if src else None
+
     doc = get_doc(db, slug)
     if doc:
         if (doc.body or "") != body.strip():
             _snapshot(db, doc)
+        if derived_from_id:
+            doc.derived_from_id = derived_from_id
         doc.title = title
         doc.body = body.strip()
         doc.subtype = subtype
@@ -493,6 +528,8 @@ def import_markdown(db: Session, path: Path, subtype_hint: str | None = None) ->
             tags=fm.get("tags") or [],
             url=fm.get("url"),
             immutable=doc_class == SOURCE,
+            derived_from_id=derived_from_id,
+            extra={"aliases": fm["aliases"]} if fm.get("aliases") else {},
         )
         db.add(doc)
     db.commit()
@@ -518,6 +555,14 @@ def to_markdown(doc: Document) -> str:
         meta["url"] = doc.url
     if doc.collection:
         meta["collection"] = doc.collection
+    if doc.derived_from_id:
+        session = object_session(doc)
+        src = session.get(Document, doc.derived_from_id) if session else None
+        if src:
+            meta["source"] = src.slug
+    aliases = (doc.extra or {}).get("aliases")
+    if aliases:
+        meta["aliases"] = list(aliases)
     meta = {k: v for k, v in meta.items() if v is not None}
     front = yaml.safe_dump(meta, sort_keys=False, allow_unicode=True).strip()
     return f"---\n{front}\n---\n\n{doc.body or ''}\n"
