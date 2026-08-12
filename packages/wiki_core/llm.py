@@ -130,9 +130,7 @@ def get_models(min_context: int = 0) -> list[str]:
             ordered.append(m)
 
     free = [
-        m
-        for m in available
-        if m.endswith(":free") and m not in ordered and m not in BLOCKED_MODELS
+        m for m in available if m.endswith(":free") and m not in ordered and m not in BLOCKED_MODELS
     ]
     free.sort(key=lambda m: next((i for i, h in enumerate(PREFERRED_FREE_HINTS) if h in m), 99))
     ordered.extend(free)
@@ -194,9 +192,7 @@ def _prepare(prompt: str, system: str) -> tuple[str, dict, list[str]]:
     return key, headers, models[:MAX_ATTEMPTS]
 
 
-def _body(
-    model: str, prompt: str, system: str, stream: bool, max_tokens: int = 2048
-) -> bytes:
+def _body(model: str, prompt: str, system: str, stream: bool, max_tokens: int = 2048) -> bytes:
     return json.dumps(
         {
             "model": model,

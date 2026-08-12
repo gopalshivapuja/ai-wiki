@@ -597,7 +597,7 @@ def test_json_is_recovered_from_a_messy_reply():
 
 
 def test_slugify_treats_separators_as_word_breaks():
-    """"Vanishing/Exploding" was slugging to "vanishingexploding"."""
+    """ "Vanishing/Exploding" was slugging to "vanishingexploding"."""
     from wiki_core.utils import slugify
 
     assert slugify("Vanishing/Exploding Gradients") == "vanishing-exploding-gradients"

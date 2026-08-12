@@ -198,9 +198,7 @@ def _add_to_moc(db: Session, moc_slug: str, moc_title: str, entries: list[tuple[
         _link_from_index(db, moc)
 
     body = moc.body or ""
-    additions = [
-        f"- [[{slug}]] — {why}" for slug, why in entries if f"[[{slug}]]" not in body
-    ]
+    additions = [f"- [[{slug}]] — {why}" for slug, why in entries if f"[[{slug}]]" not in body]
     if not additions:
         return moc.slug
     update_note(db, moc, body=body.rstrip() + "\n" + "\n".join(additions) + "\n")
@@ -314,9 +312,7 @@ SOURCE: {title}
 {body}"""
 
 
-def _write_literature_note(
-    db: Session, source: Document, links: list[tuple[str, str]]
-) -> Document:
+def _write_literature_note(db: Session, source: Document, links: list[tuple[str, str]]) -> Document:
     try:
         summary = call_llm(
             _SUMMARY_PROMPT.format(title=source.title, body=(source.body or "")[:SOURCE_CHARS]),
@@ -332,9 +328,7 @@ def _write_literature_note(
 
     concepts = ""
     if links:
-        concepts = "\n\n## Concepts\n\n" + "\n".join(
-            f"- [[{slug}]] — {why}" for slug, why in links
-        )
+        concepts = "\n\n## Concepts\n\n" + "\n".join(f"- [[{slug}]] — {why}" for slug, why in links)
 
     return upsert_literature_note(
         db,

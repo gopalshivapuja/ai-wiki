@@ -190,9 +190,7 @@ def build_link_index(db: Session) -> LinkIndex:
         by_title={title.casefold(): slug for slug, _, title, _ in rows if title},
         title_of={slug: title for slug, _, title, _ in rows},
         aliases_of=aliases_of,
-        by_alias={
-            alias.casefold(): slug for slug, names in aliases_of.items() for alias in names
-        },
+        by_alias={alias.casefold(): slug for slug, names in aliases_of.items() for alias in names},
     )
 
 
