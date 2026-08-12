@@ -21,10 +21,10 @@ An executive synthesis comparing paradigms, model developments, and production p
 ## Key Industry Shifts
 
 ### 1. Shift from Pure RAG to Persistent Knowledge Compilation
-Standard RAG retrieves unstructured text chunks dynamically at query time, forcing the LLM to re-synthesize facts on every user prompt. The emergence of persistent knowledge stores (e.g. the project conventions) replaces raw retrieval with compounding, pre-compiled markdown wikis maintained directly by agents.
+Standard RAG retrieves unstructured text chunks dynamically at query time, forcing the LLM to re-synthesize facts on every user prompt. The emergence of persistent knowledge stores (a curated wiki like this one) replaces raw retrieval with compounding, pre-compiled markdown wikis maintained directly by agents.
 
 ### 2. Shift from Framework Overhead to Composable Agent Code
-Early agent frameworks (LangChain, AutoGen) introduced complex abstractions. The consensus documented by [[anthropic|Anthropic]] in [[Building Effective Agents|Building Effective Agents]] favors lightweight, explicit control loops (`while` loops, function calling) over rigid framework abstractions.
+Early agent frameworks (LangChain, AutoGen) introduced complex abstractions. The consensus documented by [[anthropic|Anthropic]] in [[Building Effective Agents]] favors lightweight, explicit control loops (`while` loops, function calling) over rigid framework abstractions.
 
 ### 3. Convergence of Open Weights & Frontier Performance
 Open-weights models from [[meta-ai|Meta AI]] (LLaMA) and Hugging Face ([[hugging-face]]) are closing the performance gap with proprietary frontier APIs from [[openai|OpenAI]] and [[anthropic|Anthropic]], especially when paired with domain-specific [[fine-tuning-and-alignment|LoRA fine-tuning]].
@@ -43,7 +43,7 @@ Open-weights models from [[meta-ai|Meta AI]] (LLaMA) and Hugging Face ([[hugging
 ---
 
 ## Related Syntheses & Concepts
-- [[ai-learning-roadmap]]
-- [[ai-agents-and-tools]]
-- [[retrieval-augmented-generation]]
-- [[Building Effective Agents|Building Effective Agents]]
+- [[ai-learning-roadmap]] — the study order implied by this landscape.
+- [[ai-agents-and-tools]] — the design space this synthesis assesses.
+- [[retrieval-augmented-generation]] — the retrieval half of the RAG-versus-wiki argument.
+- [[building-effective-agents-anthropic|Building Effective Agents]] — the summary supporting the simple-patterns conclusion.

@@ -42,5 +42,5 @@ This interleaved loop allows the agent to recover from intermediate errors, refi
 
 - [[evaluator-optimizer-pattern|Evaluator-Optimizer Pattern]] — Secondary agent pattern focusing on quality refinement loops.
 - [[ai-agents-and-tools]] — Comprehensive overview of agentic patterns.
-- [[Building Effective Agents|Building Effective Agents]] — Engineering best practices for ReAct implementation.
+- [[building-effective-agents-anthropic|Building Effective Agents]] — Engineering best practices for ReAct implementation.
 - [[moc-agentic-patterns]] — Map of Content for agent architectures.

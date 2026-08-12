@@ -305,16 +305,23 @@ def ai_summarize(db: Session, source_slug: str) -> dict:
     return {"slug": note.slug, "title": note.title, "source_slug": src.slug}
 
 
-def ai_query(db: Session, question: str) -> dict:
+SYSTEM_PROMPT = "You answer strictly from the provided wiki context. Use wikilinks for citations."
+
+NO_CONTEXT = "Nothing in the wiki matches that question yet. Add a source first."
+
+
+def retrieve(db: Session, question: str) -> tuple[str, list[dict]]:
+    """Find the documents that should answer a question. Returns (prompt, citations).
+
+    Retrieval takes a fraction of a second, so callers can show the citations immediately
+    and let the much slower generation fill in underneath.
+    """
     from wiki_api.services.search import search
 
     # match_all=False: a question shares only a word or two with the note that answers it.
     results = search(db, question, top_k=5, match_all=False)
     if not results:
-        return {
-            "answer": "Nothing in the wiki matches that question yet. Add a source first.",
-            "citations": [],
-        }
+        return "", []
 
     slugs = [r["slug"] for r in results]
     docs = {d.slug: d for d in db.query(Document).filter(Document.slug.in_(slugs)).all()}
@@ -329,10 +336,17 @@ def ai_query(db: Session, question: str) -> dict:
         )
         citations.append({"slug": doc.slug, "title": doc.title, "doc_class": doc.doc_class})
 
-    answer = call_llm(
+    prompt = (
         f"QUESTION: {question}\n\nWIKI CONTEXT:\n" + "\n\n".join(context_parts) + "\n\n"
-        "Answer using only the context above. Cite with [[slug|Title]] wikilinks. "
-        "If the context does not answer the question, say so plainly.",
-        "You answer strictly from the provided wiki context. Use wikilinks for citations.",
+        "Answer using only the context above. Cite with [[slug|Title]] wikilinks, using the "
+        "exact slug shown in each context header. If the context does not answer the "
+        "question, say so plainly."
     )
-    return {"answer": answer, "citations": citations}
+    return prompt, citations
+
+
+def ai_query(db: Session, question: str) -> dict:
+    prompt, citations = retrieve(db, question)
+    if not prompt:
+        return {"answer": NO_CONTEXT, "citations": []}
+    return {"answer": call_llm(prompt, SYSTEM_PROMPT), "citations": citations}

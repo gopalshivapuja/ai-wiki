@@ -6,6 +6,8 @@ import { HomePage } from './HomePage';
 import { LoginPage } from './LoginPage';
 import { ManagePage } from './ManagePage';
 import { NotFoundPage } from './NotFoundPage';
+import { ScrollToTop } from './ScrollToTop';
+import { ThemeProvider, ThemeToggle } from './theme';
 import { NavSearch } from './SearchBar';
 import './index.css';
 
@@ -35,6 +37,7 @@ function Nav() {
       <NavLink to="/ask">Ask AI</NavLink>
       <NavLink to="/manage">Add source</NavLink>
       <div className="spacer" />
+      <ThemeToggle />
       <button
         className="ghost"
         onClick={() => {
@@ -55,7 +58,9 @@ const guarded = (element: React.ReactElement) => <RequireAuth>{element}</Require
 export default function App() {
   return (
     <BrowserRouter>
+      <ThemeProvider>
       <AuthProvider>
+        <ScrollToTop />
         <Nav />
         <Suspense fallback={<div className="container muted">Loading…</div>}>
           <Routes>
@@ -71,6 +76,7 @@ export default function App() {
           </Routes>
         </Suspense>
       </AuthProvider>
+      </ThemeProvider>
     </BrowserRouter>
   );
 }

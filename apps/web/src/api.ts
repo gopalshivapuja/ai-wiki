@@ -250,11 +250,92 @@ export const getLog = () =>
   api<{ entries: { action: string; summary: string; created_at: string | null }[] }>('/log');
 export const getModelStatus = () => api<ModelStatus>('/llm/models');
 
+export interface Citation {
+  slug: string;
+  title: string;
+  doc_class: DocClass;
+}
+
 export const askLLM = (question: string) =>
-  api<{ answer: string; citations: { slug: string; title: string; doc_class: DocClass }[] }>(
-    '/llm/query',
-    { method: 'POST', body: JSON.stringify({ question }) },
-  );
+  api<{ answer: string; citations: Citation[] }>('/llm/query', {
+    method: 'POST',
+    body: JSON.stringify({ question }),
+  });
+
+/** Ask a question and receive the answer progressively.
+ *
+ * Citations arrive first (retrieval is fast); the prose streams in afterwards, which is the
+ * slow part. Returns a function that aborts the request.
+ */
+export function askLLMStream(
+  question: string,
+  handlers: {
+    onCitations: (c: Citation[]) => void;
+    onText: (chunk: string) => void;
+    onDone: () => void;
+    onError: (message: string) => void;
+  },
+): () => void {
+  const controller = new AbortController();
+  const token = getToken();
+
+  (async () => {
+    let res: Response;
+    try {
+      res = await fetch(`${API}/llm/query/stream`, {
+        method: 'POST',
+        body: JSON.stringify({ question }),
+        signal: controller.signal,
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+      });
+    } catch (err) {
+      if (!controller.signal.aborted) handlers.onError('Could not reach the server.');
+      return;
+    }
+    if (!res.ok || !res.body) {
+      try {
+        await handleError(res, '/llm/query/stream');
+      } catch (err) {
+        handlers.onError((err as Error).message);
+      }
+      return;
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? ''; // keep the partial line for the next chunk
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          let event: { type: string; text?: string; citations?: Citation[]; message?: string };
+          try {
+            event = JSON.parse(line);
+          } catch {
+            continue;
+          }
+          if (event.type === 'citations') handlers.onCitations(event.citations ?? []);
+          else if (event.type === 'text') handlers.onText(event.text ?? '');
+          else if (event.type === 'done') handlers.onDone();
+          else if (event.type === 'error') handlers.onError(event.message ?? 'The model failed');
+        }
+      }
+      handlers.onDone();
+    } catch {
+      if (!controller.signal.aborted) handlers.onError('The connection dropped mid-answer.');
+    }
+  })();
+
+  return () => controller.abort();
+}
 
 /** Download the whole wiki as a zip. The only copy that isn't in the database. */
 export const exportUrl = () => `${API}/export`;

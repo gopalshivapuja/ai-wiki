@@ -41,7 +41,7 @@ tags:
 ---
 
 ## Related Knowledge
-- [[transformer-architecture]]
-- [[ai-agents-and-tools]]
-- [[state-of-ai-engineering]]
-- [[hugging-face]]
+- [[transformer-architecture]] — the context window RAG exists to work around.
+- [[ai-agents-and-tools]] — retrieval is the most common tool an agent calls.
+- [[state-of-ai-engineering]] — compares retrieval against a curated wiki.
+- [[hugging-face]] — hosts the embedding and reranking models retrieval depends on.

@@ -30,7 +30,7 @@ tags:
 ---
 
 ## Related Entities & Concepts
-- [[meta-ai]]
-- [[transformer-architecture]]
-- [[fine-tuning-and-alignment]]
-- [[retrieval-augmented-generation]]
+- [[meta-ai]] — whose open-weights models the Hub distributes.
+- [[transformer-architecture]] — the architecture the `transformers` library implements.
+- [[fine-tuning-and-alignment]] — `peft` is the standard toolkit for it.
+- [[retrieval-augmented-generation]] — the Hub hosts the embedding models retrieval needs.

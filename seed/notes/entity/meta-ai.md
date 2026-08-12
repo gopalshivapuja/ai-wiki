@@ -29,7 +29,7 @@ tags:
 ---
 
 ## Related Entities & Concepts
-- [[hugging-face]]
-- [[transformer-architecture]]
-- [[fine-tuning-and-alignment]]
-- [[openai]]
+- [[hugging-face]] — where LLaMA weights are distributed and fine-tuned.
+- [[transformer-architecture]] — the architecture LLaMA implements.
+- [[fine-tuning-and-alignment]] — open weights are what make local adaptation possible.
+- [[openai]] — the closed-weights counterpoint to Meta's open release strategy.

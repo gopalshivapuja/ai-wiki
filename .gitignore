@@ -13,3 +13,5 @@ apps/web/dist/
 llm_wiki.egg-info/
 .venv/
 static/
+test-results/
+playwright-report/

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from sqlalchemy.orm import Session
-from wiki_core.utils import WIKILINK_RE, parse_wikilinks
+from wiki_core.utils import count_wikilinks, parse_wikilinks
 
 from wiki_api.database import NOTE, SOURCE, Document
 from wiki_api.services.content import build_link_index
@@ -87,7 +87,7 @@ def stats(db: Session) -> dict:
     rows = db.query(Document.doc_class, Document.subtype, Document.body).all()
     notes = [(s, b) for c, s, b in rows if c == NOTE]
     sources = [s for c, s, _ in rows if c == SOURCE]
-    total_links = sum(len(WIKILINK_RE.findall(b or "")) for _, b in notes)
+    total_links = sum(count_wikilinks(b or "") for _, b in notes)
     subtypes = [s for s, _ in notes]
 
     return {

@@ -35,6 +35,8 @@ tags:
 ---
 
 ## Linked Concepts & Entities
-- [[ai-agents-and-tools]]
-- [[anthropic]]
-- [[state-of-ai-engineering]]
+- [[ai-agents-and-tools]] — the concept note this guide informs.
+- [[anthropic]] — the lab that published this guidance.
+- [[state-of-ai-engineering]] — how this guidance shaped the wider consensus.
+- [[react-agent-loop]] — the loop the guide recommends starting from.
+- [[evaluator-optimizer-pattern]] — the generator-critic pattern the guide describes.

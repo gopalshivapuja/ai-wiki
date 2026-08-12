@@ -15,7 +15,7 @@ tags:
 
 # Transformer Architecture
 
-The **Transformer** is the foundational deep learning neural network architecture powering virtually all modern Large Language Models (LLMs), vision transformers, and multimodal models. Introduced in 2017 by Vaswani et al. in [[Attention Is All You Need|Attention Is All You Need]], it replaced recurrent neural networks (RNNs) by relying entirely on self-attention mechanisms.
+The **Transformer** is the foundational deep learning neural network architecture powering virtually all modern Large Language Models (LLMs), vision transformers, and multimodal models. Introduced in 2017 by Vaswani et al. in [[Attention Is All You Need]], it replaced recurrent neural networks (RNNs) by relying entirely on self-attention mechanisms.
 
 ---
 
@@ -49,8 +49,10 @@ Because transformers contain no sequence recurrence or convolution, order inform
 ---
 
 ## Related Knowledge
-- [[retrieval-augmented-generation]]
-- [[fine-tuning-and-alignment]]
-- [[Attention Is All You Need|Attention Is All You Need]]
-- [[openai]]
-- [[meta-ai]]
+- [[retrieval-augmented-generation]] — what you reach for when the context window runs out.
+- [[fine-tuning-and-alignment]] — how a base transformer becomes an instruction follower.
+- [[attention-is-all-you-need-paper|Attention Is All You Need]] — the summary of the paper that introduced this architecture.
+- [[openai]] — scaled the decoder-only variant into GPT.
+- [[meta-ai]] — released the open-weights transformers most experimentation runs on.
+- [[scaled-dot-product-attention]] — the single operation at the centre of this architecture.
+- [[multi-head-attention]] — how the architecture attends to several subspaces at once.

@@ -33,7 +33,9 @@ tags:
 ---
 
 ## Linked Concepts & Entities
-- [[transformer-architecture]]
-- [[openai]]
-- [[meta-ai]]
-- [[ai-learning-roadmap]]
+- [[transformer-architecture]] — the concept note this paper established.
+- [[openai]] — took this architecture and scaled it.
+- [[meta-ai]] — released open-weights implementations of it.
+- [[ai-learning-roadmap]] — where this paper sits in the study order.
+- [[scaled-dot-product-attention]] — the paper's core operation, as its own note.
+- [[multi-head-attention]] — the paper's parallel-subspace refinement, as its own note.

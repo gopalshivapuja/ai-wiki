@@ -12,6 +12,7 @@ import {
 import { useAsync } from './hooks';
 import { JobWatcher } from './JobsPanel';
 import { Markdown } from './Markdown';
+import { Toc } from './Toc';
 
 export function DocumentView() {
   const { slug = '' } = useParams<{ slug: string }>();
@@ -97,10 +98,11 @@ export function DocumentView() {
           />
         )}
 
-        <Markdown content={doc.body} links={doc.links} />
+        <Markdown content={doc.body} links={doc.links} selfSlug={doc.slug} />
       </article>
 
       <aside className="sidebar">
+        <Toc markdown={doc.body} />
         {doc.summary && (
           <section>
             <h3>Literature note</h3>
