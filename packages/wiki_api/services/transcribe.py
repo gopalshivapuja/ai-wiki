@@ -18,9 +18,8 @@ from collections.abc import Callable
 from pathlib import Path
 
 from sqlalchemy.orm import Session
-from wiki_core.utils import slugify
 
-from wiki_api.services.content import log_action, upsert_source
+from wiki_api.services.content import store_source
 from wiki_api.services.fetch import MAX_AUDIO_BYTES, clamp
 
 logger = logging.getLogger(__name__)
@@ -126,7 +125,7 @@ def _stt_openai(path: Path) -> str:
     key = os.environ.get("OPENAI_API_KEY", "").strip()
     if not key:
         raise TranscriptionError("OPENAI_API_KEY is not set")
-    model = os.environ.get("STT_MODEL", "whisper-1")
+    model = os.environ.get("OPENAI_STT_MODEL", "whisper-1")
     body, content_type = _multipart({"model": model, "response_format": "text"}, path)
     req = urllib.request.Request(
         "https://api.openai.com/v1/audio/transcriptions",
@@ -145,7 +144,7 @@ def _stt_deepgram(path: Path) -> str:
     key = os.environ.get("DEEPGRAM_API_KEY", "").strip()
     if not key:
         raise TranscriptionError("DEEPGRAM_API_KEY is not set")
-    model = os.environ.get("STT_MODEL", "nova-2")
+    model = os.environ.get("DEEPGRAM_STT_MODEL", "nova-2")
     ctype = mimetypes.guess_type(path.name)[0] or "audio/mpeg"
     req = urllib.request.Request(
         f"https://api.deepgram.com/v1/listen?model={model}&smart_format=true&punctuate=true",
@@ -172,10 +171,15 @@ def transcribe_file(path: Path) -> str:
     )
 
 
-def ingest_audio(db: Session, url: str, on_progress: ProgressFn | None = None) -> dict:
+def fetch_transcript(url: str, on_progress: ProgressFn | None = None) -> tuple[str, dict]:
+    """Download the audio and transcribe it. Touches no database.
+
+    Kept separate from storage so the caller does not hold a pooled connection across a
+    download plus a model call that can run for ten minutes.
+    """
     if not is_configured():
         raise TranscriptionError(
-            f"Transcription is not configured. Set STT_PROVIDER and the matching API key "
+            "Transcription is not configured. Set STT_PROVIDER and the matching API key "
             f"(currently STT_PROVIDER={stt_provider()})."
         )
 
@@ -183,36 +187,34 @@ def ingest_audio(db: Session, url: str, on_progress: ProgressFn | None = None) -
     with tempfile.TemporaryDirectory(prefix="wiki-audio-") as tmp:
         path, meta = download_audio(url, Path(tmp), on_progress)
         if on_progress:
-            on_progress(2, 3, f"Transcribing {path.stat().st_size // 1_000_000}MB of audio")
+            on_progress(2, 4, f"Transcribing {path.stat().st_size // 1_000_000}MB of audio")
         transcript = transcribe_file(path)
 
     if not transcript.strip():
         raise TranscriptionError("The transcription came back empty")
+    return transcript, meta
 
+
+def store_transcript(db: Session, meta: dict, transcript: str) -> dict:
     title = meta["title"]
-    slug = slugify(title) or f"audio-{uuid.uuid4().hex[:8]}"
     duration = meta.get("duration")
     header = f"# {title}\n\n**Channel:** {meta['channel']}\n"
     if duration:
         header += f"**Duration:** {int(duration) // 60}m {int(duration) % 60}s\n"
     header += f"**Source:** [{meta['webpage_url']}]({meta['webpage_url']})\n\n"
 
-    content = clamp(f"{header}## Transcript\n\n{transcript}")
-    source, created = upsert_source(
+    doc, created = store_source(
         db,
-        slug,
-        title,
-        content,
-        "audio",
+        title=title,
+        body=clamp(f"{header}## Transcript\n\n{transcript}"),
+        subtype="audio",
         url=meta["webpage_url"],
         extra={
             "channel": meta["channel"],
             "duration": duration,
             "transcript_source": stt_provider(),
         },
+        slug_hint=uuid.uuid4().hex[:8],
+        log_label=f"Transcribed: {title}",
     )
-    if on_progress:
-        on_progress(3, 3, "Stored transcript")
-    if created:
-        log_action(db, "ingest", f"Transcribed: {title}")
-    return {"slug": source.slug, "title": title, "type": "audio", "created": created}
+    return {"slug": doc.slug, "title": doc.title, "type": "audio", "created": created}

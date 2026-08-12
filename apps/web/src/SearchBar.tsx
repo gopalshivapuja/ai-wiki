@@ -1,18 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { hitPath, searchWiki, type SearchResult } from './api';
+import { docPath, type SearchResult } from './api';
+import { useSearch } from './hooks';
 
-interface Props {
-  compact?: boolean;
-  autoFocus?: boolean;
-  onResults?: (results: SearchResult[], query: string, loading: boolean, error: string | null) => void;
-}
-
-/** Highlights the «…» markers Postgres ts_headline emits, without injecting HTML. */
+/** Renders the «…» markers Postgres ts_headline emits, without injecting HTML. */
 export function Snippet({ text }: { text: string }) {
   const parts = useMemo(() => text.split(/(«[^»]*»)/g), [text]);
   return (
-    <span>
+    <>
       {parts.map((part, i) =>
         part.startsWith('«') && part.endsWith('»') ? (
           <mark key={i}>{part.slice(1, -1)}</mark>
@@ -20,65 +15,33 @@ export function Snippet({ text }: { text: string }) {
           <span key={i}>{part}</span>
         ),
       )}
-    </span>
+    </>
   );
 }
 
-export function SearchBar({ compact = false, autoFocus = false, onResults }: Props) {
+/** Compact search for the nav: owns its own query and shows a dropdown. */
+export function NavSearch() {
   const [query, setQuery] = useState('');
-  const [results, setResults] = useState<SearchResult[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(-1);
+  const { results, loading, error } = useSearch(query, 8);
   const navigate = useNavigate();
   const boxRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    const q = query.trim();
-    if (!q) {
-      setResults([]);
-      setError(null);
-      setLoading(false);
-      onResults?.([], '', false, null);
-      return;
-    }
-    setLoading(true);
-    onResults?.(results, q, true, null);
-    const timer = setTimeout(() => {
-      searchWiki(q, compact ? 8 : 15)
-        .then((data) => {
-          setResults(data.results);
-          setError(null);
-          setActive(-1);
-          onResults?.(data.results, q, false, null);
-        })
-        .catch((err) => {
-          // Surfaced rather than swallowed: an outage used to look identical to "no results".
-          const message = err?.message || 'Search failed';
-          setResults([]);
-          setError(message);
-          onResults?.([], q, false, message);
-        })
-        .finally(() => setLoading(false));
-    }, 250);
-    return () => clearTimeout(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [query, compact]);
-
-  useEffect(() => {
-    if (!compact) return;
     const onClickAway = (e: MouseEvent) => {
       if (boxRef.current && !boxRef.current.contains(e.target as Node)) setOpen(false);
     };
     document.addEventListener('mousedown', onClickAway);
     return () => document.removeEventListener('mousedown', onClickAway);
-  }, [compact]);
+  }, []);
+
+  useEffect(() => setActive(-1), [results]);
 
   const go = (r: SearchResult) => {
     setOpen(false);
     setQuery('');
-    navigate(hitPath(r));
+    navigate(docPath(r.slug));
   };
 
   const onKeyDown = (e: React.KeyboardEvent) => {
@@ -98,15 +61,14 @@ export function SearchBar({ compact = false, autoFocus = false, onResults }: Pro
   };
 
   return (
-    <div className={compact ? 'search-box compact' : 'search-box'} ref={boxRef}>
+    <div className="search-box compact" ref={boxRef}>
       <span className="search-icon" aria-hidden="true">
         🔍
       </span>
       <input
         type="search"
         value={query}
-        autoFocus={autoFocus}
-        placeholder={compact ? 'Search…' : 'Search your knowledge base'}
+        placeholder="Search…"
         aria-label="Search the wiki"
         onChange={(e) => {
           setQuery(e.target.value);
@@ -115,7 +77,7 @@ export function SearchBar({ compact = false, autoFocus = false, onResults }: Pro
         onFocus={() => setOpen(true)}
         onKeyDown={onKeyDown}
       />
-      {compact && open && query.trim() && (
+      {open && query.trim() && (
         <div className="search-dropdown">
           {loading && <div className="dropdown-empty">Searching…</div>}
           {!loading && error && <div className="dropdown-empty error">{error}</div>}
@@ -124,12 +86,12 @@ export function SearchBar({ compact = false, autoFocus = false, onResults }: Pro
           )}
           {results.map((r, i) => (
             <button
-              key={`${r.kind}:${r.slug}`}
+              key={r.slug}
               className={`dropdown-item${i === active ? ' active' : ''}`}
               onMouseEnter={() => setActive(i)}
               onClick={() => go(r)}
             >
-              <span className="badge">{r.kind === 'source' ? r.type : r.type}</span>
+              <span className="badge">{r.type}</span>
               {r.title}
             </button>
           ))}

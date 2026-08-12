@@ -20,8 +20,7 @@ RUN apt-get update \
 # ships a wheel with no description.
 COPY pyproject.toml README.md ./
 COPY packages/ packages/
-COPY wiki/ wiki/
-COPY sources/ sources/
+COPY seed/ seed/
 
 RUN pip install --no-cache-dir .
 

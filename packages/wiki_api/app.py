@@ -20,7 +20,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 
 
 def _resolve_static_dir() -> Path:
@@ -47,7 +47,7 @@ async def lifespan(app: FastAPI):
     from wiki_api.database import init_db, session_scope
     from wiki_api.jobs.runner import JobRunner
     from wiki_api.schema_ddl import apply_schema_ddl
-    from wiki_api.services.seed import seed_if_empty
+    from wiki_api.services.archive import default_seed_dir, seed_if_empty
     from wiki_api.startup import check_secrets, wait_for_database
 
     check_secrets()
@@ -55,16 +55,15 @@ async def lifespan(app: FastAPI):
     # connect attempt often lands before the database is listening.
     wait_for_database()
 
-    # Order matters: create_all() must make the tables before apply_schema_ddl() adds columns
-    # and indexes to them, and both must precede any read of seeded content.
+    # Order matters: create_all() must make the tables before apply_schema_ddl() adds the
+    # generated column and indexes, and both must precede any read of seeded content.
     init_db()
     apply_schema_ddl()
     with session_scope() as db:
-        seed_if_empty(db)
+        seed_if_empty(db, default_seed_dir())
 
     runner = JobRunner()
     await runner.start()
-    app.state.jobs = runner
     try:
         yield
     finally:

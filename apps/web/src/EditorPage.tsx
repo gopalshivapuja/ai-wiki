@@ -1,17 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
-  createZettel,
-  deletePage,
-  getPage,
-  listPages,
-  updatePage,
-  type PageData,
+  createDoc,
+  deleteDoc,
+  docPath,
+  getDoc,
+  listDocs,
+  updateDoc,
   type WikiLink,
 } from './api';
+import { useAsync } from './hooks';
 import { Markdown } from './Markdown';
 
-const PAGE_TYPES = ['zettel', 'concept', 'entity', 'moc', 'synthesis', 'literature', 'page'];
+const NOTE_TYPES = ['zettel', 'concept', 'entity', 'moc', 'synthesis', 'literature', 'page'];
 
 interface Suggestion {
   slug: string;
@@ -28,41 +29,29 @@ export function EditorPage() {
   const [body, setBody] = useState('');
   const [type, setType] = useState('zettel');
   const [tags, setTags] = useState('');
-  const [loading, setLoading] = useState(!isNew);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
-  const [allPages, setAllPages] = useState<Suggestion[]>([]);
   const [links, setLinks] = useState<WikiLink[]>([]);
+
+  const all = useAsync(() => listDocs(), []);
+  const existing = useAsync(async () => (isNew ? null : getDoc(slug)), [slug, isNew]);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [autocomplete, setAutocomplete] = useState<{ query: string; start: number } | null>(null);
   const [activeSuggestion, setActiveSuggestion] = useState(0);
 
   useEffect(() => {
-    listPages()
-      .then((d) => setAllPages(d.pages.map((p) => ({ slug: p.slug, title: p.title }))))
-      .catch(() => setAllPages([]));
-  }, []);
+    const doc = existing.data;
+    if (!doc) return;
+    setTitle(doc.title);
+    setBody(doc.body);
+    setType(doc.type);
+    setTags((doc.tags || []).join(', '));
+    setLinks(doc.links || []);
+  }, [existing.data]);
 
-  useEffect(() => {
-    if (isNew) {
-      setLoading(false);
-      return;
-    }
-    getPage(slug)
-      .then((p: PageData) => {
-        setTitle(p.title);
-        setBody(p.body);
-        setType(p.type);
-        setTags((p.tags || []).join(', '));
-        setLinks(p.links || []);
-      })
-      .catch((err) => setError(err.message))
-      .finally(() => setLoading(false));
-  }, [slug, isNew]);
-
-  // Warn before losing unsaved edits to a browser navigation or refresh.
+  // Warn before losing unsaved edits to a refresh or a closed tab.
   useEffect(() => {
     if (!dirty) return;
     const handler = (e: BeforeUnloadEvent) => {
@@ -73,13 +62,14 @@ export function EditorPage() {
     return () => window.removeEventListener('beforeunload', handler);
   }, [dirty]);
 
-  const suggestions = useMemo(() => {
+  const suggestions: Suggestion[] = useMemo(() => {
     if (!autocomplete) return [];
     const q = autocomplete.query.toLowerCase();
-    return allPages
-      .filter((p) => p.title.toLowerCase().includes(q) || p.slug.includes(q))
-      .slice(0, 8);
-  }, [autocomplete, allPages]);
+    return (all.data?.documents ?? [])
+      .filter((d) => d.title.toLowerCase().includes(q) || d.slug.includes(q))
+      .slice(0, 8)
+      .map((d) => ({ slug: d.slug, title: d.title }));
+  }, [autocomplete, all.data]);
 
   const onBodyChange = (value: string, cursor: number) => {
     setBody(value);
@@ -100,19 +90,46 @@ export function EditorPage() {
       if (!autocomplete) return;
       const el = textareaRef.current;
       const cursor = el?.selectionStart ?? body.length;
-      const next =
-        body.slice(0, autocomplete.start) + `[[${s.slug}|${s.title}]]` + body.slice(cursor);
-      setBody(next);
+      const insert = `[[${s.slug}|${s.title}]]`;
+      setBody(body.slice(0, autocomplete.start) + insert + body.slice(cursor));
       setAutocomplete(null);
       setDirty(true);
       requestAnimationFrame(() => {
-        const pos = autocomplete.start + `[[${s.slug}|${s.title}]]`.length;
+        const pos = autocomplete.start + insert.length;
         el?.focus();
         el?.setSelectionRange(pos, pos);
       });
     },
     [autocomplete, body],
   );
+
+  const save = async () => {
+    if (!title.trim()) {
+      setError('Give the note a title first');
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    const tagList = tags
+      .split(',')
+      .map((t) => t.trim().replace(/^#/, ''))
+      .filter(Boolean);
+    try {
+      if (isNew) {
+        const created = await createDoc({ title: title.trim(), body, type, tags: tagList });
+        setDirty(false);
+        navigate(docPath(created.slug));
+      } else {
+        await updateDoc(slug, { title: title.trim(), body, tags: tagList, type });
+        setDirty(false);
+        navigate(docPath(slug));
+      }
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if ((e.metaKey || e.ctrlKey) && e.key === 's') {
@@ -135,49 +152,17 @@ export function EditorPage() {
     }
   };
 
-  const save = async () => {
-    if (!title.trim()) {
-      setError('Give the note a title first');
-      return;
-    }
-    setSaving(true);
-    setError(null);
-    const tagList = tags
-      .split(',')
-      .map((t) => t.trim().replace(/^#/, ''))
-      .filter(Boolean);
-    try {
-      if (isNew) {
-        const created = await createZettel(title.trim(), body);
-        if (tagList.length || type !== 'zettel') {
-          await updatePage(created.slug, { tags: tagList, type });
-        }
-        setDirty(false);
-        navigate(`/wiki/${encodeURIComponent(created.slug)}`);
-      } else {
-        await updatePage(slug, { title: title.trim(), body, tags: tagList, type });
-        setDirty(false);
-        navigate(`/wiki/${encodeURIComponent(slug)}`);
-      }
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const remove = async () => {
-    if (!window.confirm(`Delete “${title}” permanently? This cannot be undone.`)) return;
-    try {
-      await deletePage(slug);
-      setDirty(false);
-      navigate('/browse');
-    } catch (err) {
-      setError((err as Error).message);
-    }
-  };
-
-  if (loading) return <div className="container muted">Loading…</div>;
+  if (!isNew && existing.loading) return <div className="container muted">Loading…</div>;
+  if (!isNew && existing.error) {
+    return (
+      <div className="container">
+        <div className="empty-state">
+          <h2>Cannot edit this</h2>
+          <p className="error">{existing.error}</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="container editor">
@@ -186,6 +171,7 @@ export function EditorPage() {
           className="title-input"
           value={title}
           placeholder="Note title"
+          aria-label="Note title"
           onChange={(e) => {
             setTitle(e.target.value);
             setDirty(true);
@@ -193,12 +179,13 @@ export function EditorPage() {
         />
         <select
           value={type}
+          aria-label="Note type"
           onChange={(e) => {
             setType(e.target.value);
             setDirty(true);
           }}
         >
-          {PAGE_TYPES.map((t) => (
+          {NOTE_TYPES.map((t) => (
             <option key={t} value={t}>
               {t}
             </option>
@@ -208,6 +195,7 @@ export function EditorPage() {
           className="tags-input"
           value={tags}
           placeholder="tags, comma separated"
+          aria-label="Tags"
           onChange={(e) => {
             setTags(e.target.value);
             setDirty(true);
@@ -217,7 +205,16 @@ export function EditorPage() {
           {saving ? 'Saving…' : isNew ? 'Create' : 'Save'}
         </button>
         {!isNew && (
-          <button className="ghost danger" onClick={remove} disabled={saving}>
+          <button
+            className="ghost danger"
+            disabled={saving}
+            onClick={async () => {
+              if (!window.confirm(`Delete “${title}” permanently?`)) return;
+              await deleteDoc(slug);
+              setDirty(false);
+              navigate('/browse');
+            }}
+          >
             Delete
           </button>
         )}
@@ -225,7 +222,7 @@ export function EditorPage() {
           className="ghost"
           onClick={() => {
             if (dirty && !window.confirm('Discard unsaved changes?')) return;
-            navigate(isNew ? '/browse' : `/wiki/${encodeURIComponent(slug)}`);
+            navigate(isNew ? '/browse' : docPath(slug));
           }}
         >
           Cancel
@@ -243,6 +240,7 @@ export function EditorPage() {
             ref={textareaRef}
             value={body}
             spellCheck
+            aria-label="Note body"
             placeholder={'# Your note\n\nOne idea per note. Link generously with [[.'}
             onChange={(e) => onBodyChange(e.target.value, e.target.selectionStart)}
             onKeyDown={onKeyDown}

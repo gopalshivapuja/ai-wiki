@@ -1,72 +1,72 @@
-# LLM Wiki
+# ai-wiki
 
-A personal knowledge base: capture sources, turn them into linked atomic notes, and ask AI
-questions answered only from what you have collected. Everything lives in **PostgreSQL** —
-no files to sync, no CLI.
+A private knowledge base. Capture sources, turn them into linked atomic notes, and ask AI
+questions answered only from what you have collected.
+
+Everything lives in PostgreSQL, and everything can be exported back out as plain markdown.
 
 ## What it does
 
-**Search** — a Google-style box on the home page and in the nav. On PostgreSQL it uses real
-full-text search (ranked, with highlighted snippets, phrase queries and `-exclusions`).
+**Search** — a Google-style box on the home page and in the nav, backed by PostgreSQL
+full-text search: ranked, with highlighted snippets, phrase queries and `-exclusions`.
 
 **Notes** — create, edit and delete markdown notes in the browser, with live preview and
-`[[` autocomplete for linking. Backlinks, outgoing links, red links for notes that do not
-exist yet, tags, and an interactive knowledge graph.
+`[[` autocomplete. Backlinks, outgoing links, red links for notes you have referenced but
+not written, tags, revision history, and an interactive knowledge graph.
 
 **Add a source** — web pages, whole documentation sections (bounded crawl), YouTube
-captions, audio transcription for videos without captions, arXiv papers, PDF uploads, and
-pasted text. Long imports run as background jobs with progress and cancel.
+captions, speech-to-text for videos without captions, arXiv papers, PDF uploads, and pasted
+text. Long imports run as background jobs with progress and cancel.
 
-**Ask AI** — retrieval over your own notes, with citations that link back to the source, and
-a one-click "save this answer as a note".
+**Ask AI** — retrieval over your own notes, with citations that link back, and one-click
+"save this answer as a note".
 
-Sources are immutable; notes are yours to edit. An AI summary is written to its own page and
-can never overwrite something you wrote.
+**Backup** — download the whole wiki as a zip of markdown files, and import it again. Notes
+and sources share one link namespace, so a source is a first-class link target, not a
+footnote.
 
-## Run it locally
+Sources are captured immutably; notes are yours to edit. An AI summary is written to its own
+document and can never overwrite something you wrote.
+
+## Run it
 
 ```bash
-cp .env.example .env          # optional: add OPENROUTER_API_KEY for the AI features
+cp .env.example .env          # set JWT_SECRET; add OPENROUTER_API_KEY for the AI features
 docker compose up --build
 ```
 
-Open **http://localhost:8000** and log in with `ADMIN_EMAIL` / `ADMIN_PASSWORD`
-(`admin@example.com` / `changeme` by default — change these before deploying).
+Open **http://localhost:8000** and log in with `ADMIN_EMAIL` / `ADMIN_PASSWORD`.
 
 ### Without Docker
+
+Needs PostgreSQL (`docker compose up db` will do).
 
 ```bash
 pip install -e ".[dev]"
 cd apps/web && npm install && npm run build && cd ../..
 
-# Backend (SQLite is fine for development)
-DATABASE_URL=sqlite:///./wiki.db JWT_SECRET=dev uvicorn wiki_api.app:app --reload
+DATABASE_URL=postgresql://wiki:wiki@localhost:5432/wiki JWT_SECRET=dev \
+  uvicorn wiki_api.app:app --reload
 
-# Frontend with hot reload, in another terminal
-cd apps/web && npm run dev     # http://localhost:5173, proxies the API to :8000
+# Frontend with hot reload, in another terminal (proxies the API to :8000)
+cd apps/web && npm run dev     # http://localhost:5173
 ```
 
 ## Tests
 
 ```bash
-DATABASE_URL=sqlite:////tmp/wiki_test.db JWT_SECRET=test pytest tests/ -v
-ruff check .
-
-# Against PostgreSQL, which additionally covers full-text search and the job queue
-DATABASE_URL=postgresql://user@localhost:5432/wiki_test JWT_SECRET=test pytest tests/ -v
+DATABASE_URL=postgresql://wiki:wiki@localhost:5432/wiki_test JWT_SECRET=test pytest tests/ -v
+ruff check . && cd apps/web && npm run build
 ```
 
 ## Deploy
 
-See [DEPLOY.md](./DEPLOY.md) for Railway, including **what it costs** (roughly $6–14/month
-all-in).
+[DEPLOY.md](./DEPLOY.md) covers Railway, including what it costs (roughly $6–11/month).
 
 ## Tech stack
 
-- **Frontend** — React + Vite, served by FastAPI
-- **Backend** — FastAPI + SQLAlchemy, with an in-process background job queue
-- **Database** — PostgreSQL (SQLite supported for development and tests)
-- **AI** — OpenRouter for text, OpenAI Whisper or Deepgram for transcription
+React + Vite served by FastAPI, SQLAlchemy on PostgreSQL, an in-process background job
+queue, OpenRouter for text and OpenAI Whisper or Deepgram for transcription.
 
-Conventions and the note schema are in [AGENTS.md](./AGENTS.md); architecture notes for
-contributors are in [CLAUDE.md](./CLAUDE.md).
+Architecture and conventions are in [CLAUDE.md](./CLAUDE.md). The API documents itself at
+`/docs` while the app is running.

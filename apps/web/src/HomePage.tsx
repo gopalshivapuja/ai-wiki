@@ -1,35 +1,34 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { Link } from 'react-router-dom';
-import { getStats, hitPath, type SearchResult } from './api';
-import { SearchBar, Snippet } from './SearchBar';
+import { docPath, getStats } from './api';
+import { useAsync, useSearch } from './hooks';
+import { Snippet } from './SearchBar';
 
 export function HomePage() {
-  const [results, setResults] = useState<SearchResult[]>([]);
   const [query, setQuery] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [stats, setStats] = useState<Record<string, number> | null>(null);
-
-  useEffect(() => {
-    getStats().then(setStats).catch(() => setStats(null));
-  }, []);
+  const { results, loading, error } = useSearch(query, 15);
+  const { data: stats } = useAsync(() => getStats(), []);
 
   const idle = !query.trim();
-  const empty = stats && stats.total_pages === 0 && stats.total_sources === 0;
+  const empty = stats && stats.total_notes === 0 && stats.total_sources === 0;
 
   return (
     <div className={idle ? 'search-hero' : 'search-hero searching'}>
       <h1>What do you want to know?</h1>
 
-      <SearchBar
-        autoFocus
-        onResults={(r, q, isLoading, err) => {
-          setResults(r);
-          setQuery(q);
-          setLoading(isLoading);
-          setError(err);
-        }}
-      />
+      <div className="search-box">
+        <span className="search-icon" aria-hidden="true">
+          🔍
+        </span>
+        <input
+          type="search"
+          autoFocus
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search your knowledge base"
+          aria-label="Search your knowledge base"
+        />
+      </div>
 
       {idle && (
         <>
@@ -41,7 +40,8 @@ export function HomePage() {
           </div>
           {stats && !empty && (
             <p className="muted small">
-              {stats.total_pages} notes · {stats.total_sources} sources · {stats.total_wikilinks} links
+              {stats.total_notes} notes · {stats.total_sources} sources ·{' '}
+              {stats.total_wikilinks} links
             </p>
           )}
           {empty && (
@@ -68,10 +68,10 @@ export function HomePage() {
             </div>
           )}
           {results.map((r) => (
-            <Link className="result-item" key={`${r.kind}:${r.slug}`} to={hitPath(r)}>
+            <Link className="result-item" key={r.slug} to={docPath(r.slug)}>
               <div className="result-meta">
                 <span className="badge">{r.type}</span>
-                {r.kind === 'source' && <span className="badge source-badge">raw source</span>}
+                {r.doc_class === 'source' && <span className="badge source-badge">source</span>}
               </div>
               <div className="result-title">{r.title}</div>
               {r.snippet && (

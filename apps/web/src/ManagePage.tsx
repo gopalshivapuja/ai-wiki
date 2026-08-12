@@ -1,28 +1,31 @@
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import {
   crawlSite,
-  deleteSource,
+  deleteDoc,
+  docPath,
+  downloadExport,
   getLog,
-  getSources,
+  importArchive,
   ingestArxiv,
   ingestWeb,
   ingestYoutube,
+  listDocs,
   pasteText,
   summarizeSource,
   transcribeUrl,
   uploadPdf,
   type Job,
-  type SourceSummary,
 } from './api';
-import { JobsPanel } from './JobsPanel';
+import { useAsync } from './hooks';
+import { JobsPanel, JobWatcher } from './JobsPanel';
 
-type Tab = 'web' | 'docs' | 'youtube' | 'arxiv' | 'pdf' | 'paste';
+type Tab = 'web' | 'docs' | 'video' | 'arxiv' | 'pdf' | 'paste';
 
 const TABS: { id: Tab; label: string; hint: string }[] = [
   { id: 'web', label: 'Web page', hint: 'An article, blog post, or single page' },
   { id: 'docs', label: 'Docs site', hint: 'Crawl a documentation section' },
-  { id: 'youtube', label: 'Video', hint: 'YouTube captions, or speech-to-text' },
+  { id: 'video', label: 'Video', hint: 'YouTube captions, or speech-to-text' },
   { id: 'arxiv', label: 'arXiv', hint: 'A paper id or URL' },
   { id: 'pdf', label: 'PDF', hint: 'Upload a file' },
   { id: 'paste', label: 'Paste text', hint: 'Notes with no URL' },
@@ -35,18 +38,13 @@ export function ManagePage() {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [sources, setSources] = useState<SourceSummary[]>([]);
-  const [log, setLog] = useState<{ action: string; summary: string; created_at: string }[]>([]);
-  const [reload, setReload] = useState(0);
+  const [reloadKey, setReloadKey] = useState(0);
 
-  useEffect(() => {
-    getSources(collection || undefined)
-      .then((d) => setSources(d.sources))
-      .catch((err) => setError(err.message));
-    getLog()
-      .then((d) => setLog(d.entries))
-      .catch(() => setLog([]));
-  }, [reload, collection]);
+  const sources = useAsync(
+    () => listDocs({ doc_class: 'source', collection: collection || undefined }),
+    [collection, reloadKey],
+  );
+  const log = useAsync(() => getLog(), [reloadKey]);
 
   const submit = async (fn: () => Promise<Job>) => {
     setBusy(true);
@@ -55,7 +53,7 @@ export function ManagePage() {
     try {
       await fn();
       setMessage('Queued — watch its progress below.');
-      setReload((n) => n + 1);
+      setReloadKey((n) => n + 1);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -67,8 +65,7 @@ export function ManagePage() {
     <div className="container">
       <h1>Add a source</h1>
       <p className="muted">
-        Everything you add is captured as an immutable source, then summarized into a linked note
-        you can edit.
+        Everything you add is captured unchanged, then summarised into a linked note you can edit.
       </p>
 
       <div className="tabs" role="tablist">
@@ -91,95 +88,168 @@ export function ManagePage() {
 
       <section className="panel">
         <p className="muted small">{TABS.find((t) => t.id === tab)?.hint}</p>
-        {tab === 'web' && <WebForm busy={busy} onSubmit={submit} />}
+        {tab === 'web' && (
+          <SimpleForm
+            label="Add"
+            placeholder="https://example.com/article"
+            busy={busy}
+            withSummarize
+            onSubmit={(v, s) => submit(() => ingestWeb(v, s))}
+          />
+        )}
+        {tab === 'arxiv' && (
+          <SimpleForm
+            label="Add"
+            placeholder="1706.03762 or https://arxiv.org/abs/1706.03762"
+            busy={busy}
+            onSubmit={(v) => submit(() => ingestArxiv(v))}
+          />
+        )}
         {tab === 'docs' && <DocsForm busy={busy} onSubmit={submit} />}
-        {tab === 'youtube' && <VideoForm busy={busy} onSubmit={submit} />}
-        {tab === 'arxiv' && <ArxivForm busy={busy} onSubmit={submit} />}
+        {tab === 'video' && <VideoForm busy={busy} onSubmit={submit} />}
         {tab === 'pdf' && <PdfForm busy={busy} onSubmit={submit} />}
         {tab === 'paste' && <PasteForm busy={busy} onSubmit={submit} />}
         {message && <p className="success">{message}</p>}
         {error && <p className="error">{error}</p>}
       </section>
 
-      <JobsPanel onSettled={() => setReload((n) => n + 1)} />
+      <JobsPanel reloadKey={reloadKey} />
 
       <section className="panel">
-        <div className="row space-between">
-          <h2>Sources ({sources.length})</h2>
+        <div className="row space-between wrap">
+          <h2>Sources ({sources.data?.documents.length ?? 0})</h2>
           {collection && (
             <button className="ghost small" onClick={() => setParams({})}>
               Clear “{collection}” filter
             </button>
           )}
         </div>
-        {sources.length === 0 ? (
+        {sources.error && <p className="error">{sources.error}</p>}
+        {sources.data?.documents.length === 0 && (
           <p className="muted small">No sources yet. Add one above.</p>
-        ) : (
-          <ul className="source-list">
-            {sources.map((s) => (
-              <li key={s.slug}>
-                <div className="row space-between wrap">
-                  <div>
-                    <span className="badge">{s.type}</span>
-                    <Link to={`/source/${encodeURIComponent(s.slug)}`}>{s.title}</Link>
-                    {s.collection && (
-                      <button
-                        className="badge tag as-button"
-                        onClick={() => setParams({ collection: s.collection! })}
-                      >
-                        {s.collection}
-                      </button>
-                    )}
-                  </div>
-                  <div className="row gap">
-                    {s.summary_slug ? (
-                      <Link className="small" to={`/wiki/${encodeURIComponent(s.summary_slug)}`}>
-                        View note
-                      </Link>
-                    ) : (
-                      <button
-                        className="ghost small"
-                        onClick={() => submit(() => summarizeSource(s.slug))}
-                        disabled={busy}
-                      >
-                        Summarize
-                      </button>
-                    )}
-                    <button
-                      className="ghost small danger"
-                      onClick={async () => {
-                        if (!window.confirm(`Delete source “${s.title}”?`)) return;
-                        await deleteSource(s.slug);
-                        setReload((n) => n + 1);
-                      }}
-                    >
-                      Delete
-                    </button>
-                  </div>
-                </div>
-              </li>
-            ))}
-          </ul>
         )}
+        <ul className="source-list">
+          {sources.data?.documents.map((s) => (
+            <li key={s.slug}>
+              <div className="row space-between wrap">
+                <div>
+                  <span className="badge">{s.type}</span>
+                  <Link to={docPath(s.slug)}>{s.title}</Link>
+                  {s.collection && (
+                    <button
+                      className="badge tag as-button"
+                      onClick={() => setParams({ collection: s.collection! })}
+                    >
+                      {s.collection}
+                    </button>
+                  )}
+                </div>
+                <div className="row gap">
+                  <button
+                    className="ghost small"
+                    disabled={busy}
+                    onClick={() => submit(() => summarizeSource(s.slug))}
+                  >
+                    Summarize
+                  </button>
+                  <button
+                    className="ghost small danger"
+                    onClick={async () => {
+                      if (!window.confirm(`Delete source “${s.title}”?`)) return;
+                      await deleteDoc(s.slug);
+                      setReloadKey((n) => n + 1);
+                    }}
+                  >
+                    Delete
+                  </button>
+                </div>
+              </div>
+            </li>
+          ))}
+        </ul>
       </section>
+
+      <BackupPanel onImported={() => setReloadKey((n) => n + 1)} />
 
       <section className="panel">
         <h2>Recent activity</h2>
-        {log.length === 0 ? (
-          <p className="muted small">Nothing recorded yet.</p>
-        ) : (
-          <ul className="log-list">
-            {log.slice(0, 15).map((e, i) => (
-              <li key={i}>
-                <span className="badge">{e.action}</span>
-                {e.summary}
+        {log.data?.entries.length === 0 && <p className="muted small">Nothing recorded yet.</p>}
+        <ul className="log-list">
+          {log.data?.entries.slice(0, 15).map((e, i) => (
+            <li key={i}>
+              <span className="badge">{e.action}</span>
+              {e.summary}
+              {e.created_at && (
                 <span className="muted small"> · {new Date(e.created_at).toLocaleString()}</span>
-              </li>
-            ))}
-          </ul>
-        )}
+              )}
+            </li>
+          ))}
+        </ul>
       </section>
     </div>
+  );
+}
+
+function BackupPanel({ onImported }: { onImported: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [jobId, setJobId] = useState<number | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  return (
+    <section className="panel">
+      <h2>Backup</h2>
+      <p className="muted small">
+        Your notes live in one database. Download a copy — it is plain markdown, readable in any
+        editor, and re-importable here.
+      </p>
+      <div className="row gap wrap">
+        <button
+          disabled={busy}
+          onClick={async () => {
+            setBusy(true);
+            setError(null);
+            try {
+              await downloadExport();
+            } catch (err) {
+              setError((err as Error).message);
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          Download everything
+        </button>
+        <input
+          ref={fileRef}
+          type="file"
+          accept=".zip,application/zip"
+          aria-label="Archive to import"
+          onChange={async (e) => {
+            const file = e.target.files?.[0];
+            if (!file) return;
+            setError(null);
+            try {
+              const job = await importArchive(file);
+              setJobId(job.id);
+            } catch (err) {
+              setError((err as Error).message);
+            }
+            if (fileRef.current) fileRef.current.value = '';
+          }}
+        />
+      </div>
+      {error && <p className="error">{error}</p>}
+      {jobId !== null && (
+        <JobWatcher
+          jobId={jobId}
+          onDone={() => {
+            setJobId(null);
+            onImported();
+          }}
+        />
+      )}
+    </section>
   );
 }
 
@@ -207,27 +277,41 @@ function SummarizeToggle({
   );
 }
 
-function WebForm({ busy, onSubmit }: FormProps) {
-  const [url, setUrl] = useState('');
+/** One text field and a button — the shape shared by the web and arXiv forms. */
+function SimpleForm({
+  label,
+  placeholder,
+  busy,
+  withSummarize = false,
+  onSubmit,
+}: {
+  label: string;
+  placeholder: string;
+  busy: boolean;
+  withSummarize?: boolean;
+  onSubmit: (value: string, summarize: boolean) => Promise<void>;
+}) {
+  const [value, setValue] = useState('');
   const [summarize, setSummarize] = useState(true);
   return (
     <form
       className="stack"
       onSubmit={(e) => {
         e.preventDefault();
-        onSubmit(() => ingestWeb(url.trim(), summarize)).then(() => setUrl(''));
+        onSubmit(value.trim(), summarize).then(() => setValue(''));
       }}
     >
       <div className="row gap">
         <input
-          value={url}
-          onChange={(e) => setUrl(e.target.value)}
-          placeholder="https://example.com/article"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder={placeholder}
+          aria-label={placeholder}
           required
         />
-        <button disabled={busy || !url.trim()}>Add</button>
+        <button disabled={busy || !value.trim()}>{label}</button>
       </div>
-      <SummarizeToggle checked={summarize} onChange={setSummarize} />
+      {withSummarize && <SummarizeToggle checked={summarize} onChange={setSummarize} />}
     </form>
   );
 }
@@ -252,6 +336,7 @@ function DocsForm({ busy, onSubmit }: FormProps) {
           value={url}
           onChange={(e) => setUrl(e.target.value)}
           placeholder="https://docs.example.com/guide/"
+          aria-label="Documentation URL"
           required
         />
         <button disabled={busy || !url.trim()}>Crawl</button>
@@ -281,7 +366,7 @@ function DocsForm({ busy, onSubmit }: FormProps) {
       <SummarizeToggle
         checked={summarize}
         onChange={setSummarize}
-        label="Summarize every crawled page (one AI call each — slow and uses your quota)"
+        label="Summarize every crawled page (one AI call each — slow, and uses your quota)"
       />
       <p className="muted small">
         Follows links on the same site at or below this URL’s folder. Capped at 50 pages.
@@ -293,22 +378,29 @@ function DocsForm({ busy, onSubmit }: FormProps) {
 function VideoForm({ busy, onSubmit }: FormProps) {
   const [url, setUrl] = useState('');
   const [summarize, setSummarize] = useState(true);
+  const captions = () => onSubmit(() => ingestYoutube(url.trim(), summarize)).then(() => setUrl(''));
+
   return (
-    <form className="stack" onSubmit={(e) => e.preventDefault()}>
+    <form
+      className="stack"
+      onSubmit={(e) => {
+        e.preventDefault();
+        captions();
+      }}
+    >
       <input
         value={url}
         onChange={(e) => setUrl(e.target.value)}
         placeholder="https://www.youtube.com/watch?v=…"
+        aria-label="Video URL"
       />
       <SummarizeToggle checked={summarize} onChange={setSummarize} />
       <div className="row gap wrap">
-        <button
-          disabled={busy || !url.trim()}
-          onClick={() => onSubmit(() => ingestYoutube(url.trim(), summarize)).then(() => setUrl(''))}
-        >
+        <button type="submit" disabled={busy || !url.trim()}>
           Use captions
         </button>
         <button
+          type="button"
           className="ghost"
           disabled={busy || !url.trim()}
           onClick={() => onSubmit(() => transcribeUrl(url.trim(), summarize)).then(() => setUrl(''))}
@@ -318,29 +410,9 @@ function VideoForm({ busy, onSubmit }: FormProps) {
       </div>
       <p className="muted small">
         Captions are free and instant. Transcription downloads the audio and sends it to a
-        speech-to-text API (about $0.36 per hour of audio) — use it when a video has no captions.
+        speech-to-text API (about $0.36 per hour) — use it when a video has no captions. Note that
+        YouTube often blocks downloads from cloud servers.
       </p>
-    </form>
-  );
-}
-
-function ArxivForm({ busy, onSubmit }: FormProps) {
-  const [value, setValue] = useState('');
-  return (
-    <form
-      className="row gap"
-      onSubmit={(e) => {
-        e.preventDefault();
-        onSubmit(() => ingestArxiv(value.trim())).then(() => setValue(''));
-      }}
-    >
-      <input
-        value={value}
-        onChange={(e) => setValue(e.target.value)}
-        placeholder="1706.03762 or https://arxiv.org/abs/1706.03762"
-        required
-      />
-      <button disabled={busy || !value.trim()}>Add</button>
     </form>
   );
 }
@@ -367,6 +439,7 @@ function PdfForm({ busy, onSubmit }: FormProps) {
         ref={inputRef}
         type="file"
         accept="application/pdf,.pdf"
+        aria-label="PDF file"
         onChange={(e) => setFile(e.target.files?.[0] ?? null)}
         required
       />
@@ -374,6 +447,7 @@ function PdfForm({ busy, onSubmit }: FormProps) {
         value={title}
         onChange={(e) => setTitle(e.target.value)}
         placeholder="Title (optional — taken from the PDF otherwise)"
+        aria-label="Title"
       />
       <SummarizeToggle checked={summarize} onChange={setSummarize} />
       <button disabled={busy || !file}>Upload</button>
@@ -401,6 +475,7 @@ function PasteForm({ busy, onSubmit }: FormProps) {
         value={title}
         onChange={(e) => setTitle(e.target.value)}
         placeholder="Title"
+        aria-label="Title"
         required
       />
       <textarea
@@ -408,6 +483,7 @@ function PasteForm({ busy, onSubmit }: FormProps) {
         value={text}
         onChange={(e) => setText(e.target.value)}
         placeholder="Paste anything — meeting notes, an email, a transcript…"
+        aria-label="Text to store"
         required
       />
       <SummarizeToggle checked={summarize} onChange={setSummarize} />

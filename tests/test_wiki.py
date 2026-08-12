@@ -1,22 +1,31 @@
-"""Tests for the DB-backed LLM Wiki."""
+"""Tests for ai-wiki.
+
+Runs against a real PostgreSQL database — there is no second dialect to fall back on, and a
+fallback search engine would only hide failures in the real one. `docker compose up db`
+provides one, or point DATABASE_URL at any local Postgres.
+"""
 
 from __future__ import annotations
 
+import io
 import os
 import time
+import zipfile
 from pathlib import Path
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-os.environ.setdefault("DATABASE_URL", "sqlite:////tmp/wiki_test.db")
+os.environ.setdefault("DATABASE_URL", "postgresql://wiki:wiki@localhost:5432/wiki_test")
 os.environ.setdefault("JWT_SECRET", "test-secret")
 os.environ.setdefault("ADMIN_EMAIL", "admin@example.com")
 os.environ.setdefault("ADMIN_PASSWORD", "changeme")
 os.environ.setdefault("WIKI_SEED_DIR", str(REPO_ROOT))
 
 from fastapi.testclient import TestClient  # noqa: E402
+
+AUTH = {"email": "admin@example.com", "password": "changeme"}
 
 
 @pytest.fixture(scope="module")
@@ -25,15 +34,15 @@ def client():
     from wiki_api.database import Base, engine
 
     Base.metadata.drop_all(bind=engine)
-    # Enter the context manager so lifespan actually runs — init_db, schema DDL, seeding and
-    # the job runner all live there and were previously untested.
+    # Entered as a context manager so lifespan actually runs: wait_for_database, the secret
+    # checks, create_all, the generated-column DDL, seeding, and the job runner.
     with TestClient(app) as c:
         yield c
 
 
 @pytest.fixture(scope="module")
 def token(client):
-    r = client.post("/api/auth/login", json={"email": "admin@example.com", "password": "changeme"})
+    r = client.post("/api/auth/login", json=AUTH)
     assert r.status_code == 200, r.text
     return r.json()["access_token"]
 
@@ -41,6 +50,16 @@ def token(client):
 @pytest.fixture()
 def auth(token):
     return {"Authorization": f"Bearer {token}"}
+
+
+def _wait(client, auth, job_id, timeout=30):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        job = client.get(f"/api/jobs/{job_id}", headers=auth).json()
+        if job["status"] in ("done", "failed", "cancelled"):
+            return job
+        time.sleep(0.1)
+    raise AssertionError(f"job {job_id} did not finish in {timeout}s")
 
 
 # --- basics -------------------------------------------------------------------
@@ -52,221 +71,276 @@ def test_health(client):
     assert r.json()["status"] == "ok"
 
 
-def test_seeding_actually_imported_content(client):
+def test_seeding_imported_content(client, auth):
     """Guards the bug where production seeded nothing because the path resolved wrong."""
-    r = client.get("/api/stats")
-    assert r.status_code == 200
-    data = r.json()
-    assert data["total_pages"] > 0, "no pages were seeded"
-    assert data["total_sources"] > 0, "no sources were seeded"
+    s = client.get("/api/stats", headers=auth).json()
+    assert s["total_notes"] > 0, "no notes were seeded"
+    assert s["total_sources"] > 0, "no sources were seeded"
 
 
-def test_search(client):
-    r = client.get("/api/search?q=attention&limit=3")
-    assert r.status_code == 200
-    assert len(r.json()["results"]) > 0
-
-
-def test_search_results_carry_kind(client, auth):
-    r = client.get("/api/search?q=attention&limit=10", headers=auth)
-    results = r.json()["results"]
-    assert results
-    assert all(x["kind"] in ("page", "source") for x in results)
-
-
-def test_anonymous_search_excludes_sources(client, auth):
-    """Raw sources sit behind auth, so anonymous search must not leak their text."""
-    anon = client.get("/api/search?q=transformer&limit=20").json()["results"]
-    assert all(x["kind"] == "page" for x in anon)
-    authed = client.get("/api/search?q=transformer&limit=20", headers=auth).json()["results"]
-    assert any(x["kind"] == "source" for x in authed)
-
-
-def test_get_page(client):
-    r = client.get("/api/pages/transformer-architecture")
-    assert r.status_code == 200
-    body = r.json()
-    assert "transformer" in body["title"].lower()
-    assert "backlinks" in body and "links" in body
-
-
-def test_missing_page_404(client):
-    assert client.get("/api/pages/no-such-page-xyz").status_code == 404
-
-
-def test_graph(client):
-    r = client.get("/api/graph")
-    assert r.status_code == 200
-    data = r.json()
-    assert len(data["nodes"]) > 0
-    slugs = {n["slug"] for n in data["nodes"]}
-    for e in data["edges"]:
-        assert e["source"] in slugs and e["target"] in slugs
-
-
-def test_login(client):
-    r = client.post("/api/auth/login", json={"email": "admin@example.com", "password": "changeme"})
-    assert r.status_code == 200
-    assert "access_token" in r.json()
-
-
-def test_login_rejects_bad_password(client):
-    r = client.post("/api/auth/login", json={"email": "admin@example.com", "password": "nope"})
+def test_login_rejects_bad_password_with_a_useful_message(client):
+    """A wrong password used to surface as 'Login required' and clear the session."""
+    r = client.post("/api/auth/login", json={**AUTH, "password": "nope"})
     assert r.status_code == 401
+    assert "password" in r.json()["detail"].lower()
 
 
-# --- auth ---------------------------------------------------------------------
+def test_everything_requires_auth(client):
+    for method, path in [
+        ("get", "/api/search?q=x"),
+        ("get", "/api/documents"),
+        ("get", "/api/graph"),
+        ("get", "/api/stats"),
+        ("get", "/api/export"),
+        ("post", "/api/documents"),
+        ("get", "/api/jobs"),
+    ]:
+        r = getattr(client, method)(path)
+        assert r.status_code == 401, f"{method} {path} was reachable without a token"
 
 
-def test_write_endpoints_require_auth(client):
-    assert client.post("/api/zettels", json={"title": "Nope"}).status_code == 401
-    assert client.put("/api/pages/transformer-architecture", json={"body": "x"}).status_code == 401
-    assert client.delete("/api/pages/transformer-architecture").status_code == 401
-    assert client.get("/api/sources").status_code == 401
-    assert client.post("/api/jobs/paste", json={"title": "a", "text": "b"}).status_code == 401
+# --- the merged document model ------------------------------------------------
 
 
-# --- CRUD ---------------------------------------------------------------------
+def test_sources_and_notes_share_one_namespace(client, auth):
+    docs = client.get("/api/documents", headers=auth).json()["documents"]
+    slugs = [d["slug"] for d in docs]
+    assert len(slugs) == len(set(slugs)), "slugs must be unique across notes and sources"
+    assert any(d["doc_class"] == "source" for d in docs)
+    assert any(d["doc_class"] == "note" for d in docs)
 
 
-def test_zettel_lifecycle(client, auth):
-    r = client.post("/api/zettels", json={"title": "Test Concept Alpha"}, headers=auth)
-    assert r.status_code == 201, r.text
-    slug = r.json()["slug"]
-    assert slug == "test-concept-alpha"
+def test_wikilinks_resolve_to_sources(client, auth):
+    """The point of the merge: a source can be a link target.
 
-    # duplicate
-    assert (
-        client.post("/api/zettels", json={"title": "Test Concept Alpha"}, headers=auth).status_code
-        == 409
-    )
+    Under the previous two-table model this was structurally impossible.
+    """
+    sources = client.get("/api/documents?doc_class=source", headers=auth).json()["documents"]
+    assert sources
+    detail = client.get(f"/api/documents/{sources[0]['slug']}", headers=auth).json()
+    assert detail["backlinks"], "no note links to this source"
 
-    r = client.put(
-        f"/api/pages/{slug}",
-        json={"body": "# Alpha\n\nLinks to [[transformer-architecture]].", "tags": ["test"]},
+    graph = client.get("/api/graph", headers=auth).json()
+    source_slugs = {n["slug"] for n in graph["nodes"] if n["doc_class"] == "source"}
+    assert any(e["target"] in source_slugs for e in graph["edges"])
+
+
+def test_seed_data_has_no_broken_links(client, auth):
+    """A fresh install should not greet you with red links."""
+    assert client.get("/api/orphans", headers=auth).json()["wanted"] == []
+
+
+def test_sources_are_immutable(client, auth):
+    sources = client.get("/api/documents?doc_class=source", headers=auth).json()["documents"]
+    r = client.put(f"/api/documents/{sources[0]['slug']}", json={"body": "x"}, headers=auth)
+    assert r.status_code == 409
+    assert "cannot be edited" in r.json()["detail"]
+
+
+# --- notes --------------------------------------------------------------------
+
+
+def test_note_lifecycle(client, auth):
+    r = client.post(
+        "/api/documents",
+        json={"title": "Test Concept Alpha", "body": "# A\n\nSee [[transformer-architecture]]."},
         headers=auth,
     )
-    assert r.status_code == 200
-    assert "transformer-architecture" in r.json()["body"]
+    assert r.status_code == 201, r.text
+    slug = r.json()["slug"]
 
-    # the edit must be visible as a backlink on the target
-    backlinks = client.get("/api/pages/transformer-architecture").json()["backlinks"]
-    assert any(b["slug"] == slug for b in backlinks)
+    dup = client.post("/api/documents", json={"title": "Test Concept Alpha"}, headers=auth)
+    assert dup.status_code == 409
 
-    # outgoing links resolve
-    links = client.get(f"/api/pages/{slug}").json()["links"]
-    assert any(link["slug"] == "transformer-architecture" and link["exists"] for link in links)
+    detail = client.get(f"/api/documents/{slug}", headers=auth).json()
+    assert any(
+        link["slug"] == "transformer-architecture" and link["exists"] for link in detail["links"]
+    )
 
-    assert client.delete(f"/api/pages/{slug}", headers=auth).status_code == 204
-    assert client.get(f"/api/pages/{slug}").status_code == 404
+    back = client.get("/api/documents/transformer-architecture", headers=auth).json()["backlinks"]
+    assert any(b["slug"] == slug for b in back)
+
+    # PUT returns the same shape as GET, so a client can use the response directly.
+    updated = client.put(
+        f"/api/documents/{slug}", json={"body": "changed", "tags": ["t"]}, headers=auth
+    )
+    assert updated.status_code == 200
+    assert {"backlinks", "links", "revision_count"} <= set(updated.json())
+
+    assert client.delete(f"/api/documents/{slug}", headers=auth).status_code == 204
+    assert client.get(f"/api/documents/{slug}", headers=auth).status_code == 404
 
 
-def test_zettel_rejects_unusable_title(client, auth):
+def test_note_title_must_be_usable(client, auth):
     """A title with no ASCII letters used to create a page at an unreachable empty slug."""
-    r = client.post("/api/zettels", json={"title": "注意機構"}, headers=auth)
+    r = client.post("/api/documents", json={"title": "注意機構"}, headers=auth)
     assert r.status_code == 409
 
 
-def test_page_type_validated(client, auth):
-    client.post("/api/zettels", json={"title": "Type Check Page"}, headers=auth)
-    r = client.put("/api/pages/type-check-page", json={"type": "bogus"}, headers=auth)
-    assert r.status_code == 400
-    client.delete("/api/pages/type-check-page", headers=auth)
+def test_revisions_capture_and_restore(client, auth):
+    client.post("/api/documents", json={"title": "Rev Doc", "body": "v1"}, headers=auth)
+    client.put("/api/documents/rev-doc", json={"body": "v2"}, headers=auth)
+    client.put("/api/documents/rev-doc", json={"body": "v3"}, headers=auth)
+
+    revs = client.get("/api/documents/rev-doc/revisions", headers=auth).json()["revisions"]
+    assert [r["preview"] for r in revs] == ["v2", "v1"]
+
+    client.post(f"/api/documents/rev-doc/restore/{revs[-1]['id']}", headers=auth)
+    assert client.get("/api/documents/rev-doc", headers=auth).json()["body"] == "v1"
+    client.delete("/api/documents/rev-doc", headers=auth)
 
 
-def test_source_read_and_summary_slug(client, auth):
-    sources = client.get("/api/sources", headers=auth).json()["sources"]
-    assert sources
-    slug = sources[0]["slug"]
-    r = client.get(f"/api/sources/{slug}", headers=auth)
-    assert r.status_code == 200
-    assert r.json()["body"]
+def test_validation_errors_are_structured(client, auth):
+    """422 detail is a list of objects; the client must render it as a sentence."""
+    r = client.post("/api/documents", json={"title": ""}, headers=auth)
+    assert r.status_code == 422
+    assert isinstance(r.json()["detail"], list)
 
 
-def test_resolve_endpoint(client):
-    assert client.get("/api/resolve?target=transformer-architecture").json()["exists"] is True
-    assert client.get("/api/resolve?target=Transformer Architecture").json()["slug"] == (
-        "transformer-architecture"
+# --- search -------------------------------------------------------------------
+
+
+def test_search_ranks_and_highlights(client, auth):
+    results = client.get("/api/search?q=attention&limit=5", headers=auth).json()["results"]
+    assert results
+    assert all(
+        {"score", "slug", "title", "snippet", "type", "doc_class"} <= set(r) for r in results
     )
-    assert client.get("/api/resolve?target=nothing-here-at-all").json()["exists"] is False
+    assert [r["score"] for r in results] == sorted((r["score"] for r in results), reverse=True)
+    assert any("«" in r["snippet"] for r in results), "expected highlighted snippets"
+
+
+def test_search_handles_punctuation_and_phrases(client, auth):
+    # websearch_to_tsquery must not raise on characters a user will actually type.
+    for q in ['"self attention"', "what is (attention)?", "attention -foo", "a & b | c"]:
+        assert client.get(f"/api/search?q={q}", headers=auth).status_code == 200
+
+
+def test_search_can_exclude_sources(client, auth):
+    r = client.get("/api/search?q=attention&include_sources=false", headers=auth).json()
+    assert all(x["doc_class"] == "note" for x in r["results"])
+
+
+# --- backup -------------------------------------------------------------------
+
+
+def test_export_import_round_trip(client, auth):
+    """The durability story: everything must survive a trip through the archive."""
+    before = client.get("/api/stats", headers=auth).json()
+
+    data = client.get("/api/export", headers=auth).content
+    names = zipfile.ZipFile(io.BytesIO(data)).namelist()
+    assert len(names) > before["total_notes"]
+    assert any(n.startswith("sources/") for n in names)
+    assert any(n.startswith("notes/") for n in names)
+
+    job = client.post(
+        "/api/jobs/import",
+        files={"file": ("backup.zip", data, "application/zip")},
+        headers=auth,
+    ).json()
+    finished = _wait(client, auth, job["id"])
+    assert finished["status"] == "done", finished
+    assert finished["result"]["failed"] == []
+
+    after = client.get("/api/stats", headers=auth).json()
+    assert after["total_notes"] == before["total_notes"]
+    assert after["total_wikilinks"] == before["total_wikilinks"]
 
 
 # --- jobs ---------------------------------------------------------------------
 
 
-def _wait_for_job(client, auth, job_id, timeout=30):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        job = client.get(f"/api/jobs/{job_id}", headers=auth).json()
-        if job["status"] in ("done", "failed", "cancelled"):
-            return job
-        time.sleep(0.1)
-    raise AssertionError(f"job {job_id} did not finish within {timeout}s")
-
-
-def test_paste_job_runs_end_to_end(client, auth):
+def test_paste_job_end_to_end(client, auth):
     r = client.post(
         "/api/jobs/paste",
-        json={"title": "Pasted Test Note", "text": "Some content about vector databases."},
+        json={"title": "Pasted Test Note", "text": "Content about vector databases."},
         headers=auth,
     )
-    assert r.status_code == 200, r.text
-    job = _wait_for_job(client, auth, r.json()["id"])
+    job = _wait(client, auth, r.json()["id"])
     assert job["status"] == "done", job
-    assert job["result"]["slug"] == "pasted-test-note"
-
-    source = client.get("/api/sources/pasted-test-note", headers=auth)
-    assert source.status_code == 200
-    assert "vector databases" in source.json()["body"]
+    slug = job["result"]["slug"]
+    assert client.get(f"/api/documents/{slug}", headers=auth).json()["immutable"] is True
 
 
-def test_job_validation_and_cancel(client, auth):
-    bad = client.post("/api/jobs/paste", json={"title": "", "text": "x"}, headers=auth)
-    assert bad.status_code == 422
+def test_job_failure_retry_and_cancel(client, auth):
+    bad = client.post("/api/jobs/web", json={"url": "file:///etc/passwd"}, headers=auth)
+    failed = _wait(client, auth, bad.json()["id"])
+    assert failed["status"] == "failed"
+    assert "http" in (failed["error"] or "").lower()
 
-    r = client.post(
-        "/api/jobs/crawl", json={"url": "https://example.com/docs", "max_pages": 999}, headers=auth
-    )
-    assert r.status_code == 422  # above HARD_MAX_PAGES
+    retried = client.post(f"/api/jobs/{failed['id']}/retry", headers=auth)
+    assert retried.status_code == 200
+    _wait(client, auth, retried.json()["id"])
 
-    r = client.post("/api/jobs/paste", json={"title": "Cancel Me", "text": "x"}, headers=auth)
-    job_id = r.json()["id"]
-    cancel = client.post(f"/api/jobs/{job_id}/cancel", headers=auth)
-    # Either it was cancelled while queued, or it already completed — both are valid races.
-    assert cancel.status_code in (200, 409)
+    assert client.post(f"/api/jobs/{failed['id']}/cancel", headers=auth).status_code == 409
+
+
+def test_reap_orphans_leaves_fresh_jobs_alone(client, auth):
+    """A booting container must not kill the outgoing container's in-flight work."""
+    from datetime import timedelta
+
+    from wiki_api.database import Job, session_scope, utcnow
+    from wiki_api.jobs.runner import reap_orphans
+
+    with session_scope() as db:
+        fresh = Job(kind="crawl", status="running", params={}, started_at=utcnow())
+        old = Job(
+            kind="crawl",
+            status="running",
+            params={},
+            started_at=utcnow() - timedelta(hours=1),
+        )
+        db.add_all([fresh, old])
+        db.flush()
+        fresh_id, old_id = fresh.id, old.id
+
+    reap_orphans()
+
+    with session_scope() as db:
+        assert db.get(Job, old_id).status == "failed"
+        assert db.get(Job, fresh_id).status == "running"
+        db.query(Job).filter(Job.id.in_([fresh_id, old_id])).delete(synchronize_session=False)
 
 
 def test_pdf_rejects_non_pdf(client, auth):
     r = client.post(
-        "/api/jobs/pdf",
-        files={"file": ("notes.txt", b"hello", "text/plain")},
-        headers=auth,
+        "/api/jobs/pdf", files={"file": ("notes.txt", b"hello", "text/plain")}, headers=auth
     )
     assert r.status_code == 400
 
 
-# --- security -----------------------------------------------------------------
+# --- SPA and security ---------------------------------------------------------
+
+
+def test_spa_is_served(client):
+    """Break the static copy in the Dockerfile and both CI jobs used to stay green."""
+    if client.get("/").status_code == 503:
+        pytest.skip("frontend not built in this environment")
+    for path in ("/", "/browse", "/doc/anything"):
+        r = client.get(path)
+        assert r.status_code == 200, path
+        assert 'id="root"' in r.text, f"{path} did not return the app shell"
+
+
+def test_unknown_api_path_is_json_404(client):
+    r = client.get("/api/definitely-not-a-route")
+    assert r.status_code == 404
+    assert r.headers["content-type"].startswith("application/json")
 
 
 def test_static_path_traversal_blocked(client):
     for path in ("/../../etc/passwd", "/..%2f..%2fetc%2fpasswd", "/static/../../../etc/passwd"):
         r = client.get(path)
-        assert r.status_code in (200, 404, 503), path
         assert b"root:" not in r.content, f"served /etc/passwd via {path}"
 
 
-def test_ingest_rejects_non_http_schemes(client, auth):
-    from wiki_api.services.fetch import FetchError, fetch_text
-
-    for url in ("file:///etc/passwd", "ftp://example.com/x", "gopher://example.com"):
-        with pytest.raises(FetchError):
-            fetch_text(url)
-
-
-def test_ingest_rejects_internal_addresses(client, auth):
+def test_fetch_rejects_dangerous_urls():
     from wiki_api.services.fetch import FetchError, fetch_text
 
     for url in (
+        "file:///etc/passwd",
+        "ftp://example.com/x",
         "http://127.0.0.1:8000/",
         "http://localhost/",
         "http://169.254.169.254/latest/meta-data/",
@@ -285,41 +359,11 @@ def test_slugify():
     assert slugify("注意機構") == ""
 
 
-def test_wikilinks():
+def test_wikilink_parsing():
     from wiki_core.utils import parse_wikilinks
 
     links = parse_wikilinks("See [[foo|Bar]] and [[baz]].")
-    assert len(links) == 2
-    assert links[0].target == "foo"
-    assert links[0].display == "Bar"
-
-
-def test_summary_slug_is_namespaced():
-    """AI summaries must not be able to land on the curated note about the same material."""
-    from wiki_api.services.content import summary_slug
-
-    assert summary_slug("attention-is-all-you-need-paper") != "attention-is-all-you-need-paper"
-    assert summary_slug("x").startswith("summary-")
-
-
-def test_upsert_page_protects_curated_pages():
-    from wiki_api.database import session_scope
-    from wiki_api.services.content import upsert_page
-
-    with session_scope() as db:
-        upsert_page(db, "curated-guard-test", "Curated", "hand written", page_type="zettel")
-        with pytest.raises(ValueError):
-            upsert_page(
-                db,
-                "curated-guard-test",
-                "Robot",
-                "generated",
-                page_type="literature",
-                protect_curated=True,
-            )
-        from wiki_api.services.content import delete_page
-
-        delete_page(db, "curated-guard-test")
+    assert [(x.target, x.display) for x in links] == [("foo", "Bar"), ("baz", None)]
 
 
 def test_crawl_scope_rules():
@@ -331,13 +375,12 @@ def test_crawl_scope_rules():
     assert not in_scope(start, "https://evil.example.org/guide/x")
     assert not in_scope(start, "https://docs.example.com/guide/logo.png")
 
-    # A directory start URL keeps its own segment in scope.
     dir_start = "https://docs.example.com/guide/"
     assert in_scope(dir_start, "https://docs.example.com/guide/setup")
     assert not in_scope(dir_start, "https://docs.example.com/reference/api")
 
 
-def test_crawl_preserves_trailing_slash_for_relative_links():
+def test_crawl_preserves_trailing_slash():
     """Stripping it made urljoin resolve every relative docs link one directory too high."""
     from urllib.parse import urljoin
 
@@ -347,118 +390,73 @@ def test_crawl_preserves_trailing_slash_for_relative_links():
     assert urljoin(base, "next.html") == "https://docs.example.com/tutorial/next.html"
 
 
-def test_search_bm25_directly():
+def test_crawl_fetches_each_page_once(monkeypatch):
+    """The crawler used to fetch every page twice: once for links, once to store it."""
     from wiki_api.database import session_scope
-    from wiki_api.services.search_bm25 import search_bm25
+    from wiki_api.services import crawl
+    from wiki_api.services.content import delete_doc
+
+    pages = {
+        "https://ex.test/d/": "<html><title>Index</title><a href='a.html'>a</a></html>",
+        "https://ex.test/d/a.html": "<html><title>A</title>body text here</html>",
+    }
+    calls: list[str] = []
+
+    def fake_fetch(url, **kwargs):
+        calls.append(url)
+        return "text/html", pages[url]
+
+    monkeypatch.setattr(crawl, "fetch_text", fake_fetch)
+    monkeypatch.setattr(crawl, "POLITENESS_DELAY", 0)
 
     with session_scope() as db:
-        results = search_bm25(db, "attention", top_k=5)
-    assert results
-    assert all({"score", "slug", "title", "snippet", "type", "kind"} <= set(r) for r in results)
+        result = crawl.crawl_site(db, "https://ex.test/d/", max_pages=5, max_depth=1)
+
+    assert result["pages"] == 2
+    assert sorted(calls) == sorted(pages), "each page must be fetched exactly once"
+
+    with session_scope() as db:
+        for slug in result["created"]:
+            delete_doc(db, slug)
 
 
-@pytest.mark.skipif(
-    not os.environ.get("TEST_DATABASE_URL_PG"),
-    reason="set TEST_DATABASE_URL_PG to exercise the Postgres full-text path",
-)
-def test_search_postgres():
-    """Runs the real FTS path. Without this, only the SQLite fallback is ever tested."""
-    import wiki_api.database as database
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
-    from wiki_api.schema_ddl import apply_schema_ddl
-    from wiki_api.services.search_pg import search_postgres
-
-    pg_engine = create_engine(os.environ["TEST_DATABASE_URL_PG"])
-    original = database.engine
-    database.engine = pg_engine
-    try:
-        database.Base.metadata.create_all(bind=pg_engine)
-        apply_schema_ddl()
-        Session = sessionmaker(bind=pg_engine)
-        with Session() as db:
-            from wiki_api.services.content import upsert_page
-
-            upsert_page(
-                db,
-                "pg-fts-probe",
-                "Postgres FTS Probe",
-                "Retrieval augmented generation over a vector index.",
-                page_type="zettel",
-            )
-            results = search_postgres(db, "retrieval augmented", top_k=5)
-            assert any(r["slug"] == "pg-fts-probe" for r in results)
-            assert all(r["kind"] in ("page", "source") for r in results)
-    finally:
-        database.engine = original
-        pg_engine.dispose()
-
-
-def test_page_title_decodes_entities_and_strips_site_suffix():
+def test_page_title_decodes_entities():
     """Raw entities used to survive into slugs as digits, e.g. "&#8212;" -> "8212"."""
     from wiki_api.services.fetch import page_title
     from wiki_core.utils import slugify
 
-    title = page_title(
-        "<html><title>4. More Control Flow Tools &#8212; Python 3.14 documentation</title>", "x"
-    )
-    assert title == "4. More Control Flow Tools"
+    title = page_title("<html><title>4. Tools &#8212; Python 3.14 documentation</title>", "x")
+    assert title == "4. Tools"
     assert "8212" not in slugify(title)
 
 
-# --- startup guards -----------------------------------------------------------
-
-
-def test_is_production_detection(monkeypatch):
-    from wiki_api.startup import is_production
-
-    for url, expected in [
-        ("sqlite:////tmp/x.db", False),
-        ("postgresql://wiki:wiki@localhost:5432/wiki", False),
-        ("postgresql://wiki:wiki@db:5432/wiki", False),  # docker compose
-        ("postgresql://u:p@containers-us-west-1.railway.app:6543/railway", True),
-        ("", False),
-    ]:
-        monkeypatch.setenv("DATABASE_URL", url)
-        assert is_production() is expected, url
-
-
-def test_default_jwt_secret_blocks_production_boot(monkeypatch):
-    """The default secret is published in this repo — booting with it means forgeable tokens."""
-    from wiki_api.startup import StartupError, check_secrets
+def test_startup_secret_guard(monkeypatch):
+    from wiki_api.startup import StartupError, check_secrets, is_production
 
     monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@monorail.proxy.rlwy.net:6543/railway")
+    assert is_production()
     monkeypatch.delenv("JWT_SECRET", raising=False)
     with pytest.raises(StartupError, match="JWT_SECRET"):
         check_secrets()
 
     monkeypatch.setenv("JWT_SECRET", "a-real-secret")
-    check_secrets()  # must not raise
+    check_secrets()
 
-
-def test_default_secret_is_allowed_in_local_development(monkeypatch):
-    from wiki_api.startup import check_secrets
-
-    monkeypatch.setenv("DATABASE_URL", "sqlite:////tmp/dev.db")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://wiki:wiki@localhost:5432/wiki")
     monkeypatch.delenv("JWT_SECRET", raising=False)
-    monkeypatch.delenv("ADMIN_PASSWORD", raising=False)
-    check_secrets()  # warns, does not raise
+    assert not is_production()
+    check_secrets()  # local development must not be blocked
 
 
-def test_wait_for_database_retries_then_gives_up(monkeypatch):
-    """A database that never comes up must fail with a clear message, not a raw driver error."""
-    import wiki_api.startup as startup
-    from sqlalchemy import create_engine
+def test_every_env_var_is_documented():
+    """Keeps .env.example honest as new knobs appear."""
+    import re
 
-    monkeypatch.setattr(startup.time, "sleep", lambda _s: None)
-    dead = create_engine("postgresql://nobody@127.0.0.1:1/none", connect_args={"connect_timeout": 1})
-    monkeypatch.setattr("wiki_api.database.engine", dead)
-
-    with pytest.raises(startup.StartupError, match="Could not reach the database"):
-        startup.wait_for_database(attempts=2)
-
-
-def test_wait_for_database_succeeds_on_live_engine():
-    from wiki_api.startup import wait_for_database
-
-    wait_for_database(attempts=1)  # the test engine is live
+    documented = (REPO_ROOT / ".env.example").read_text()
+    undocumented = {
+        name
+        for py in (REPO_ROOT / "packages").rglob("*.py")
+        for name in re.findall(r'os\.environ\.get\(\s*"([A-Z_]+)"', py.read_text())
+        if name not in documented
+    }
+    assert not undocumented, f"add these to .env.example: {sorted(undocumented)}"

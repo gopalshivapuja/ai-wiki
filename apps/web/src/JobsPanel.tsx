@@ -1,8 +1,14 @@
-import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { cancelJob, getJob, isJobActive, listJobs, retryJob, type Job } from './api';
-
-const POLL_MS = 2000;
+import {
+  cancelJob,
+  docPath,
+  getJob,
+  isJobActive,
+  listJobs,
+  retryJob,
+  type Job,
+} from './api';
+import { usePoll } from './hooks';
 
 const STATUS_LABEL: Record<Job['status'], string> = {
   queued: 'Queued',
@@ -18,47 +24,47 @@ function describe(job: Job): string {
   return p.url || p.id_or_url || p.title || p.source_slug || p.filename || job.kind;
 }
 
-function resultLinks(job: Job) {
+function ResultLinks({ job }: { job: Job }) {
   const result = job.result as Record<string, unknown> | null;
   if (!result) return null;
   const slug = result.slug as string | undefined;
-  const summaries = (result.summaries as { slug?: string }[] | undefined) || [];
-  const note = summaries.find((s) => s.slug)?.slug;
+  const summaries = (result.summaries as { slug?: string; error?: string }[] | undefined) || [];
+  const note = summaries.find((s) => s.slug && !s.error)?.slug;
+  const failedSummary = summaries.find((s) => s.error);
+
   return (
-    <span className="row gap small">
-      {slug && <Link to={`/source/${encodeURIComponent(slug)}`}>View source</Link>}
-      {note && note !== slug && <Link to={`/wiki/${encodeURIComponent(note)}`}>View note</Link>}
+    <span className="row gap small wrap">
+      {slug && <Link to={docPath(slug)}>View source</Link>}
+      {note && note !== slug && <Link to={docPath(note)}>View note</Link>}
       {typeof result.pages === 'number' && <span className="muted">{result.pages} pages</span>}
+      {typeof result.imported === 'number' && (
+        <span className="muted">{result.imported} documents imported</span>
+      )}
+      {failedSummary && <span className="muted">summary failed: {failedSummary.error}</span>}
     </span>
   );
 }
 
-/** Compact inline watcher for a single job. */
+/** Inline watcher for one job. */
 export function JobWatcher({ jobId, onDone }: { jobId: number; onDone?: (job: Job) => void }) {
-  const [job, setJob] = useState<Job | null>(null);
-
-  useEffect(() => {
-    let stop = false;
-    const tick = () => {
-      getJob(jobId)
-        .then((j) => {
-          if (stop) return;
-          setJob(j);
-          if (!isJobActive(j)) onDone?.(j);
-          else setTimeout(tick, POLL_MS);
-        })
-        .catch(() => {});
-    };
-    tick();
-    return () => {
-      stop = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [jobId]);
+  const { data: job } = usePoll(
+    () => getJob(jobId),
+    (j) => {
+      const active = isJobActive(j);
+      if (!active) onDone?.(j);
+      return active;
+    },
+    jobId,
+  );
 
   if (!job) return <p className="muted small">Starting…</p>;
   if (job.status === 'failed') return <p className="error small">{job.error}</p>;
-  if (job.status === 'done') return <p className="success small">Done. {resultLinks(job)}</p>;
+  if (job.status === 'done')
+    return (
+      <p className="success small">
+        Done. <ResultLinks job={job} />
+      </p>
+    );
   return (
     <p className="muted small">
       {STATUS_LABEL[job.status]}… {job.progress.message}
@@ -66,62 +72,24 @@ export function JobWatcher({ jobId, onDone }: { jobId: number; onDone?: (job: Jo
   );
 }
 
-export function JobsPanel({ onSettled }: { onSettled?: () => void }) {
-  const [jobs, setJobs] = useState<Job[]>([]);
-  const [error, setError] = useState<string | null>(null);
-
-  const refresh = () =>
-    listJobs(15)
-      .then((d) => {
-        setJobs(d.jobs);
-        setError(null);
-        return d.jobs;
-      })
-      .catch((err) => {
-        setError(err.message);
-        return [] as Job[];
-      });
-
-  useEffect(() => {
-    let timer: number | undefined;
-    let cancelled = false;
-    let wasActive = false;
-
-    const loop = async () => {
-      const current = await refresh();
-      if (cancelled) return;
-      const active = current.some(isJobActive);
-      if (wasActive && !active) onSettled?.();
-      wasActive = active;
-      // Only poll while something is actually running — no endless background traffic.
-      if (active) timer = window.setTimeout(loop, POLL_MS);
-    };
-    loop();
-
-    const onFocus = () => loop();
-    window.addEventListener('focus', onFocus);
-    return () => {
-      cancelled = true;
-      if (timer) clearTimeout(timer);
-      window.removeEventListener('focus', onFocus);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+export function JobsPanel({ reloadKey = 0 }: { reloadKey?: number }) {
+  const { data, error, refresh } = usePoll(
+    () => listJobs(15),
+    (d) => d.jobs.some(isJobActive),
+    reloadKey,
+  );
+  const jobs = data?.jobs ?? [];
 
   const act = async (fn: (id: number) => Promise<Job>, id: number) => {
-    try {
-      await fn(id);
-      await refresh();
-    } catch (err) {
-      setError((err as Error).message);
-    }
+    await fn(id);
+    refresh();
   };
 
   return (
     <section className="panel">
       <div className="row space-between">
         <h2>Activity</h2>
-        <button className="ghost small" onClick={() => void refresh()}>
+        <button className="ghost small" onClick={refresh}>
           Refresh
         </button>
       </div>
@@ -133,8 +101,8 @@ export function JobsPanel({ onSettled }: { onSettled?: () => void }) {
 
       <ul className="job-list">
         {jobs.map((job) => (
-          <li key={job.id} className={`job job-${job.status}`}>
-            <div className="row space-between">
+          <li key={job.id} className="job">
+            <div className="row space-between wrap">
               <div>
                 <span className="badge">{job.kind}</span>
                 <strong>{describe(job)}</strong>
@@ -161,15 +129,13 @@ export function JobsPanel({ onSettled }: { onSettled?: () => void }) {
               </div>
             )}
 
-            {job.status === 'done' && resultLinks(job)}
+            {job.status === 'done' && <ResultLinks job={job} />}
             {(job.status === 'failed' || job.status === 'cancelled') && (
-              <div className="row gap">
+              <div className="row gap wrap">
                 <span className="error small">{job.error}</span>
-                {job.kind !== 'pdf' && (
-                  <button className="ghost small" onClick={() => act(retryJob, job.id)}>
-                    Retry
-                  </button>
-                )}
+                <button className="ghost small" onClick={() => act(retryJob, job.id)}>
+                  Retry
+                </button>
               </div>
             )}
           </li>

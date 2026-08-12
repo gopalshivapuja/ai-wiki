@@ -1,148 +1,178 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { getStats, getTags, listPages } from './api';
-import { useAuth } from './auth';
-
-interface PageRow {
-  slug: string;
-  title: string;
-  type: string;
-  tags: string[];
-}
+import { docPath, getOrphans, getStats, getTags, listDocs, type DocSummary } from './api';
+import { useAsync } from './hooks';
 
 export function BrowsePage() {
   const [params, setParams] = useSearchParams();
   const tag = params.get('tag');
   const type = params.get('type');
-  const { isAuthed } = useAuth();
+  const view = params.get('view');
 
-  const [pages, setPages] = useState<PageRow[]>([]);
-  const [tags, setTags] = useState<{ tag: string; count: number }[]>([]);
-  const [stats, setStats] = useState<Record<string, number> | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    setLoading(true);
-    listPages({ tag: tag || undefined, type: type || undefined })
-      .then((d) => {
-        setPages(d.pages);
-        setError(null);
-      })
-      .catch((err) => setError(err.message))
-      .finally(() => setLoading(false));
-  }, [tag, type]);
-
-  useEffect(() => {
-    getTags().then((d) => setTags(d.tags)).catch(() => setTags([]));
-    getStats().then(setStats).catch(() => setStats(null));
-  }, []);
+  const docs = useAsync(
+    () => listDocs({ tag: tag || undefined, type: type || undefined, doc_class: 'note' }),
+    [tag, type],
+  );
+  const tags = useAsync(() => getTags(), []);
+  const stats = useAsync(() => getStats(), []);
+  const orphanData = useAsync(() => getOrphans(), []);
 
   const byType = useMemo(() => {
-    const groups = new Map<string, PageRow[]>();
-    for (const p of pages) {
-      if (!groups.has(p.type)) groups.set(p.type, []);
-      groups.get(p.type)!.push(p);
+    const groups = new Map<string, DocSummary[]>();
+    for (const d of docs.data?.documents ?? []) {
+      if (!groups.has(d.type)) groups.set(d.type, []);
+      groups.get(d.type)!.push(d);
     }
     return [...groups.entries()].sort((a, b) => b[1].length - a[1].length);
-  }, [pages]);
+  }, [docs.data]);
 
-  const setFilter = (key: 'tag' | 'type', value: string | null) => {
+  const setFilter = (key: 'tag' | 'type' | 'view', value: string | null) => {
     const next = new URLSearchParams(params);
     if (value) next.set(key, value);
     else next.delete(key);
     setParams(next);
   };
 
+  const orphans = orphanData.data;
+
   return (
     <div className="container">
       <div className="row space-between wrap">
         <h1>Browse</h1>
-        {isAuthed && (
+        <div className="row gap">
+          <Link className="button-link" to="/browse?view=loose">
+            Loose ends
+          </Link>
           <Link className="button-link" to="/edit/new">
             New note
           </Link>
-        )}
+        </div>
       </div>
 
-      {stats && (
+      {stats.data && (
         <p className="muted small">
-          {stats.total_pages} notes · {stats.zettels} zettels · {stats.concepts} concepts ·{' '}
-          {stats.entities} entities · {stats.mocs} maps of content · {stats.total_sources} sources
+          {stats.data.total_notes} notes · {stats.data.zettels} zettels · {stats.data.concepts}{' '}
+          concepts · {stats.data.entities} entities · {stats.data.mocs} maps of content ·{' '}
+          {stats.data.total_sources} sources
         </p>
       )}
 
-      {(tag || type) && (
-        <p className="row gap">
-          <span className="muted small">Filtered by</span>
-          {type && (
-            <button className="badge as-button" onClick={() => setFilter('type', null)}>
-              type: {type} ✕
-            </button>
-          )}
-          {tag && (
-            <button className="badge as-button" onClick={() => setFilter('tag', null)}>
-              #{tag} ✕
-            </button>
-          )}
-        </p>
-      )}
-
-      {tags.length > 0 && (
+      {view === 'loose' && orphans && (
         <section className="panel">
-          <h2>Tags</h2>
-          <div className="row gap wrap">
-            {tags.slice(0, 40).map((t) => (
-              <button
-                key={t.tag}
-                className={`badge tag as-button${tag === t.tag ? ' active' : ''}`}
-                onClick={() => setFilter('tag', tag === t.tag ? null : t.tag)}
-              >
-                #{t.tag} <span className="muted">{t.count}</span>
-              </button>
-            ))}
+          <div className="row space-between">
+            <h2>Loose ends</h2>
+            <button className="ghost small" onClick={() => setFilter('view', null)}>
+              Back to all
+            </button>
           </div>
+          <p className="muted small">
+            A Zettelkasten is only as good as its links. These are the notes nothing points at, and
+            the notes you have referenced but never written.
+          </p>
+
+          <h3>Nothing links here ({orphans.unlinked.length})</h3>
+          {orphans.unlinked.length === 0 ? (
+            <p className="muted small">Every note is linked from somewhere. Nice.</p>
+          ) : (
+            <ul className="page-list">
+              {orphans.unlinked.map((o) => (
+                <li key={o.slug}>
+                  <Link to={docPath(o.slug)}>{o.title}</Link>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          <h3>Referenced but not written ({orphans.wanted.length})</h3>
+          {orphans.wanted.length === 0 ? (
+            <p className="muted small">No dangling links.</p>
+          ) : (
+            <ul className="page-list">
+              {orphans.wanted.map((w) => (
+                <li key={w.target}>
+                  <Link to={`/edit/new?title=${encodeURIComponent(w.target)}`}>{w.target}</Link>
+                  <span className="muted small"> — mentioned {w.mentions}×</span>
+                </li>
+              ))}
+            </ul>
+          )}
         </section>
       )}
 
-      {error && <p className="error">{error}</p>}
-      {loading && <p className="muted">Loading…</p>}
+      {view !== 'loose' && (
+        <>
+          {(tag || type) && (
+            <p className="row gap wrap">
+              <span className="muted small">Filtered by</span>
+              {type && (
+                <button className="badge as-button" onClick={() => setFilter('type', null)}>
+                  type: {type} ✕
+                </button>
+              )}
+              {tag && (
+                <button className="badge as-button" onClick={() => setFilter('tag', null)}>
+                  #{tag} ✕
+                </button>
+              )}
+            </p>
+          )}
 
-      {!loading && pages.length === 0 && (
-        <div className="empty-state">
-          <p>No notes match this filter.</p>
-          {isAuthed && <Link to="/edit/new">Create one →</Link>}
-        </div>
-      )}
-
-      {byType.map(([groupType, rows]) => (
-        <section className="panel" key={groupType}>
-          <div className="row space-between">
-            <h2>
-              {groupType} <span className="muted small">({rows.length})</span>
-            </h2>
-            <button className="ghost small" onClick={() => setFilter('type', groupType)}>
-              Only these
-            </button>
-          </div>
-          <ul className="page-list">
-            {rows.map((p) => (
-              <li key={p.slug}>
-                <Link to={`/wiki/${encodeURIComponent(p.slug)}`}>{p.title}</Link>
-                {p.tags.slice(0, 4).map((t) => (
+          {(tags.data?.tags.length ?? 0) > 0 && (
+            <section className="panel">
+              <h2>Tags</h2>
+              <div className="row gap wrap">
+                {tags.data?.tags.slice(0, 40).map((t) => (
                   <button
-                    key={t}
-                    className="badge tag as-button"
-                    onClick={() => setFilter('tag', t)}
+                    key={t.tag}
+                    className={`badge tag as-button${tag === t.tag ? ' active' : ''}`}
+                    onClick={() => setFilter('tag', tag === t.tag ? null : t.tag)}
                   >
-                    #{t}
+                    #{t.tag} <span className="muted">{t.count}</span>
                   </button>
                 ))}
-              </li>
-            ))}
-          </ul>
-        </section>
-      ))}
+              </div>
+            </section>
+          )}
+
+          {docs.error && <p className="error">{docs.error}</p>}
+          {docs.loading && <p className="muted">Loading…</p>}
+          {!docs.loading && byType.length === 0 && (
+            <div className="empty-state">
+              <p>No notes match this filter.</p>
+              <Link to="/edit/new">Write one →</Link>
+            </div>
+          )}
+
+          {byType.map(([groupType, rows]) => (
+            <section className="panel" key={groupType}>
+              <div className="row space-between">
+                <h2>
+                  {groupType} <span className="muted small">({rows.length})</span>
+                </h2>
+                <button className="ghost small" onClick={() => setFilter('type', groupType)}>
+                  Only these
+                </button>
+              </div>
+              <ul className="page-list">
+                {rows.map((d) => (
+                  <li key={d.slug}>
+                    <Link to={docPath(d.slug)}>{d.title}</Link>
+                    {d.tags.slice(0, 4).map((t) => (
+                      <button
+                        key={t}
+                        className="badge tag as-button"
+                        onClick={() => setFilter('tag', t)}
+                      >
+                        #{t}
+                      </button>
+                    ))}
+                  </li>
+                ))}
+              </ul>
+            </section>
+          ))}
+        </>
+      )}
     </div>
   );
 }
