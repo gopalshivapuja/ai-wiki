@@ -87,6 +87,14 @@ An atomic concept is one idea that would still make sense in its own note, month
 away from this source — "Cross-Entropy Loss", "Backpropagation", "Tool Use". It is NOT a
 section heading, a lesson number, or a whole topic like "machine learning".
 
+Exclude the logistics around the material: course platforms, cohorts, office hours, teaching
+assistants, enrolment, badges, fees, scheduling. Those describe how the material is delivered,
+not what it teaches. If a source is purely administrative, return an empty list.
+
+Name each concept in its plainest, most canonical form — "Vanishing Gradient", not "The
+Vanishing Gradient Problem in RNNs" — and singular rather than plural, so the same idea met
+in two lectures lands on one note.
+
 Return at most {limit} concepts, most central first. For each give:
   name     - the canonical name, as it would title a note
   aliases  - other names or abbreviations used for it (e.g. ["MHA"]), [] if none
@@ -159,11 +167,28 @@ def _normalise(name: str) -> str:
         " networks",
         " mechanism",
         " mechanisms",
+        " problem",
     ):
         if n.endswith(suffix) and len(n) > len(suffix) + 3:
             n = n[: -len(suffix)].strip()
             break
-    return n
+    return _singular(n)
+
+
+def _singular(n: str) -> str:
+    """Fold a trailing plural on the last word.
+
+    "Vanishing Gradient", "Vanishing Gradients" and "Vanishing Gradient Problem" arrived from
+    three different lectures and became three notes.
+
+    Only a consonant followed by "s" is treated as a plural, which keeps "loss" and "bias"
+    whole. That under-folds words like "values", and deliberately so: leaving two notes
+    unmerged is a nuisance, while merging two genuinely different ideas loses writing.
+    """
+    head, _, last = n.rpartition(" ")
+    if len(last) > 3 and last.endswith("s") and last[-2] not in "aeious":
+        last = last[:-1]
+    return f"{head} {last}".strip() if head else last
 
 
 def find_existing(db: Session, index: LinkIndex, concept: Concept) -> str | None:

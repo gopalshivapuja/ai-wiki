@@ -630,6 +630,18 @@ def test_normalisation_folds_ml_suffixes():
     assert _normalise("Positional Encoding") != _normalise("Rotary Positional Encoding")
 
 
+def test_normalisation_folds_plurals_and_problem_suffix():
+    """Three lectures produced three notes for one idea: gradient, gradients, and problem."""
+    from wiki_api.services.distill import _normalise
+
+    one = _normalise("Vanishing Gradient")
+    assert _normalise("Vanishing Gradients") == one
+    assert _normalise("Vanishing Gradient Problem") == one
+    # Words that merely end in s are not stems.
+    assert _normalise("Loss") == "loss"
+    assert _normalise("Bias") == "bias"
+
+
 def test_blocked_captions_fall_back_to_ytdlp(monkeypatch):
     """The direct caption endpoint is IP-blocked for cloud hosts; yt-dlp is the second route."""
     from wiki_api.services import ingest
