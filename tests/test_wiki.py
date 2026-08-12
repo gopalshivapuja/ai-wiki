@@ -699,3 +699,50 @@ def test_bracketed_markdown_link_is_not_a_wikilink():
     assert count_wikilinks(text) == 0
     # A genuine link, including one followed by prose in parentheses, still counts.
     assert len(parse_wikilinks("See [[transformer]] and [[rag|RAG]].")) == 2
+
+
+def test_two_sources_sharing_a_concept_produce_one_note(client, auth, monkeypatch):
+    """The whole point of distillation: the second source links, it does not duplicate.
+
+    Also asserts that every link written lands on a document that exists — the dangling-link
+    failure this pipeline was built to end.
+    """
+    from wiki_api.database import session_scope
+    from wiki_api.services import distill as D
+    from wiki_api.services.content import build_link_index, get_doc, store_source
+    from wiki_core.utils import parse_wikilinks
+
+    # Lecture two names the idea in plural, which is how the real transcripts differed.
+    replies = iter(
+        [
+            [
+                D.Concept(
+                    name="Vanishing Gradient", summary="Gradients shrink.", why="it limits depth"
+                )
+            ],
+            [
+                D.Concept(
+                    name="Vanishing Gradients", summary="Gradients shrink.", why="it recurs here"
+                )
+            ],
+        ]
+    )
+    monkeypatch.setattr(D, "extract_concepts", lambda source, limit=8: next(replies))
+    monkeypatch.setattr(D, "call_llm", lambda *a, **k: "A summary.")
+
+    with session_scope() as db:
+        first, _ = store_source(db, title="Lecture A", body="body a", subtype="paste")
+        second, _ = store_source(db, title="Lecture B", body="body b", subtype="paste")
+
+        one = D.distill(db, first, moc_slug="moc-test-course", moc_title="Test Course")
+        two = D.distill(db, second, moc_slug="moc-test-course", moc_title="Test Course")
+
+        assert len(one.created) == 1, "the first source should create the note"
+        assert two.created == [], "the second source must not duplicate it"
+        assert two.linked == one.created, "the second source must link to the existing note"
+
+        index = build_link_index(db)
+        for slug in [one.literature_slug, two.literature_slug, "moc-test-course"]:
+            doc = get_doc(db, slug)
+            for link in parse_wikilinks(doc.body or ""):
+                assert index.resolve(link.target), f"{slug} links to missing {link.target!r}"
