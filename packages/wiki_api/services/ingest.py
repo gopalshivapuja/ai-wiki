@@ -308,7 +308,8 @@ def ai_summarize(db: Session, source_slug: str) -> dict:
 def ai_query(db: Session, question: str) -> dict:
     from wiki_api.services.search import search
 
-    results = search(db, question, top_k=5)
+    # match_all=False: a question shares only a word or two with the note that answers it.
+    results = search(db, question, top_k=5, match_all=False)
     if not results:
         return {
             "answer": "Nothing in the wiki matches that question yet. Add a source first.",

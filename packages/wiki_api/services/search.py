@@ -22,7 +22,21 @@ _HEADLINE_OPTS = "MaxFragments=2,FragmentDelimiter= … ,MinWords=6,MaxWords=22,
 
 _SQL = text(
     f"""
-WITH q AS (SELECT websearch_to_tsquery('english', :query) AS tsq),
+WITH q AS (
+    SELECT CASE WHEN :match_all
+        -- Search box: every term must match, so results are precise.
+        THEN websearch_to_tsquery('english', :query)
+        -- Retrieval for RAG: any term may match, ranked by how many and how close.
+        -- A natural question ("why does multi-head attention help?") shares only a couple
+        -- of words with the right note, so requiring all of them retrieves nothing at all.
+        -- to_tsquery of NULL is NULL and simply matches no rows, so an all-stopword
+        -- question degrades quietly instead of raising.
+        ELSE to_tsquery(
+            'english',
+            (SELECT string_agg(lexeme, ' | ') FROM unnest(to_tsvector('english', :query)))
+        )
+    END AS tsq
+),
 hits AS (
     SELECT d.id, d.slug, d.title, d.doc_class, d.subtype,
            ts_rank_cd(d.search_tsv, q.tsq)
@@ -44,8 +58,18 @@ ORDER BY h.score DESC, h.title ASC
 )
 
 
-def search(db: Session, query: str, top_k: int = 12, include_sources: bool = True) -> list[dict]:
-    """Ranked hits: {score, slug, title, snippet, type, doc_class}."""
+def search(
+    db: Session,
+    query: str,
+    top_k: int = 12,
+    include_sources: bool = True,
+    match_all: bool = True,
+) -> list[dict]:
+    """Ranked hits: {score, slug, title, snippet, type, doc_class}.
+
+    `match_all=False` loosens the query to "any term", which is what retrieval for the AI
+    needs — a question is not a search phrase.
+    """
     if not query.strip():
         return []
 
@@ -58,6 +82,7 @@ def search(db: Session, query: str, top_k: int = 12, include_sources: bool = Tru
                 "headline_chars": HEADLINE_MAX_CHARS,
                 "source_weight": SOURCE_WEIGHT,
                 "include_sources": include_sources,
+                "match_all": match_all,
             },
         )
         .mappings()

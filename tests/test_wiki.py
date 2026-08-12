@@ -460,3 +460,20 @@ def test_every_env_var_is_documented():
         if name not in documented
     }
     assert not undocumented, f"add these to .env.example: {sorted(undocumented)}"
+
+
+def test_question_retrieval_uses_any_term_matching(client, auth):
+    """A natural question shares few words with the note that answers it.
+
+    With all-terms matching, "why does multi-head attention help?" retrieved nothing and Ask
+    AI always replied that the wiki was empty.
+    """
+    from wiki_api.database import session_scope
+    from wiki_api.services.search import search
+
+    question = "What is multi-head attention and why does it help?"
+    with session_scope() as db:
+        assert search(db, question, match_all=True) == []
+        loose = search(db, question, match_all=False, top_k=5)
+    assert loose, "question retrieval returned nothing"
+    assert any("attention" in r["slug"] for r in loose)
