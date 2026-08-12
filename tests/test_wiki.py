@@ -617,3 +617,14 @@ def test_import_does_not_redistil_a_restore(monkeypatch):
 
     runner._queue_distillation("import", {"distill": True}, {"sources": ["src-a"]})
     assert [q["source_slug"] for q in queued] == ["src-a"]
+
+
+def test_normalisation_folds_ml_suffixes():
+    """ "Transformer" forked from "Transformer Architecture" during the real load."""
+    from wiki_api.services.distill import _normalise
+
+    assert _normalise("Transformer") == _normalise("Transformer Architecture")
+    assert _normalise("Attention") == _normalise("Attention Mechanism")
+    assert _normalise("Recurrent Neural Network") == _normalise("Recurrent Neural Networks")
+    # Genuinely different ideas must stay apart.
+    assert _normalise("Positional Encoding") != _normalise("Rotary Positional Encoding")

@@ -141,8 +141,25 @@ def _normalise(name: str) -> str:
     n = name.casefold().strip()
     n = re.sub(r"\s*\([^)]*\)", "", n)  # drop parenthetical glosses
     n = re.sub(r"[^a-z0-9]+", " ", n).strip()
-    # "Cross-Entropy Loss" and "cross entropy" should meet.
-    for suffix in (" function", " algorithm", " method", " technique", " loss", " layer"):
+    # "Cross-Entropy Loss" and "cross entropy" should meet, and so should "Transformer" and
+    # "Transformer Architecture" — that pair forked a second note in the real run.
+    for suffix in (
+        " function",
+        " algorithm",
+        " method",
+        " technique",
+        " loss",
+        " layer",
+        " layers",
+        " architecture",
+        " architectures",
+        " model",
+        " models",
+        " network",
+        " networks",
+        " mechanism",
+        " mechanisms",
+    ):
         if n.endswith(suffix) and len(n) > len(suffix) + 3:
             n = n[: -len(suffix)].strip()
             break
