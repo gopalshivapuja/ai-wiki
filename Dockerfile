@@ -37,4 +37,8 @@ USER appuser
 
 EXPOSE 8000
 
-CMD uvicorn wiki_api.app:app --host 0.0.0.0 --port ${PORT} --workers 1
+# `exec` so uvicorn replaces the shell and becomes PID 1. Without it the shell is PID 1,
+# SIGTERM never reaches uvicorn, and the platform SIGKILLs the container ~30s later — which
+# defeats the graceful shutdown that lets in-flight jobs finish on every redeploy.
+# One worker: the job runner's reap_orphans assumes a single runner process.
+CMD ["sh", "-c", "exec uvicorn wiki_api.app:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1"]
