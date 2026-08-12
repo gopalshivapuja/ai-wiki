@@ -145,6 +145,35 @@ def _finish(job_id: int, status: str, result: dict | None = None, error: str | N
         job.finished_at = utcnow()
 
 
+def _queue_distillation(kind: str, params: dict, result: object) -> None:
+    """Queue distillation for every source a job captured.
+
+    The single place this decision is made. Handlers used to each decide for themselves,
+    which is why arXiv never summarised, crawl and paste defaulted to off, and import never
+    did — so whether the wiki grew a graph depended on which button was pressed.
+    """
+    if kind == "distill" or not isinstance(result, dict):
+        return
+    if not params.get("distill", True):
+        return
+    sources = [s for s in (result.get("sources") or []) if s]
+    if not sources:
+        return
+
+    with session_scope() as db:
+        for slug in sources:
+            enqueue(
+                db,
+                "distill",
+                {
+                    "source_slug": slug,
+                    "moc": params.get("moc"),
+                    "moc_title": params.get("moc_title"),
+                },
+            )
+    logger.info("Queued distillation for %d source(s) from a %s job", len(sources), kind)
+
+
 def _execute_job(job_id: int) -> None:
     from wiki_api.jobs.handlers import HANDLERS
 
@@ -165,6 +194,7 @@ def _execute_job(job_id: int) -> None:
 
     try:
         result = handler(params, ctx)
+        _queue_distillation(kind, params, result)
     except JobCancelled as exc:
         logger.info("Job %s (%s) cancelled: %s", job_id, kind, exc)
         _finish(job_id, "cancelled", error=str(exc))

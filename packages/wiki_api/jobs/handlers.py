@@ -2,6 +2,12 @@
 
 Plain synchronous functions, each run whole in a worker thread. They open a database session
 only around actual database work — never for the duration of a network call.
+
+Handlers **capture**; they do not distil. Any source a handler stores is reported back in
+`result["sources"]`, and the runner queues distillation for it. That is the single choke
+point: previously each handler decided for itself whether to summarise, so arXiv never did,
+crawl and paste defaulted to off, and import never did — meaning whether your wiki grew a
+graph depended on which button you pressed.
 """
 
 from __future__ import annotations
@@ -13,40 +19,23 @@ from pathlib import Path
 
 from wiki_api.database import session_scope
 from wiki_api.jobs.runner import JobContext, JobHandler
-from wiki_api.services import archive, crawl, ingest, transcribe
+from wiki_api.services import archive, crawl, distill, ingest, transcribe
 
 logger = logging.getLogger(__name__)
 
 
-def _summarize(slug: str, ctx: JobContext, enabled: bool) -> list[dict]:
-    """Write a literature note for a freshly ingested source.
-
-    Failures are recorded rather than raised: the source is already stored, and losing the
-    ingest because the model was rate-limited would be the wrong trade.
-    """
-    if not enabled:
-        return []
-    ctx.progress(1, 2, "Summarizing with AI")
-    try:
-        with session_scope() as db:
-            return [ingest.ai_summarize(db, slug)]
-    except Exception as exc:
-        logger.warning("Auto-summarize failed for %s: %s", slug, exc)
-        return [{"slug": slug, "error": str(exc)}]
-
-
-def _ingest_job(fn, params: dict, ctx: JobContext, *args) -> dict:
-    ctx.progress(0, 2, "Fetching")
-    with session_scope() as db:
-        result = fn(db, *args)
-    ctx.progress(1, 2, "Stored")
-    result["summaries"] = _summarize(result["slug"], ctx, params.get("summarize", True))
-    ctx.progress(2, 2, "Done")
+def _captured(result: dict, *slugs: str) -> dict:
+    """Mark the sources a handler created so the runner can distil them."""
+    result["sources"] = [s for s in slugs if s]
     return result
 
 
 def handle_web(params: dict, ctx: JobContext) -> dict:
-    return _ingest_job(ingest.ingest_web, params, ctx, params["url"])
+    ctx.progress(0, 1, "Fetching page")
+    with session_scope() as db:
+        result = ingest.ingest_web(db, params["url"])
+    ctx.progress(1, 1, "Stored")
+    return _captured(result, result["slug"])
 
 
 def handle_arxiv(params: dict, ctx: JobContext) -> dict:
@@ -54,15 +43,23 @@ def handle_arxiv(params: dict, ctx: JobContext) -> dict:
     with session_scope() as db:
         result = ingest.ingest_arxiv(db, params["id_or_url"])
     ctx.progress(1, 1, "Stored")
-    return result
+    return _captured(result, result["slug"])
 
 
 def handle_youtube(params: dict, ctx: JobContext) -> dict:
-    return _ingest_job(ingest.ingest_youtube, params, ctx, params["url"])
+    ctx.progress(0, 1, "Fetching captions")
+    with session_scope() as db:
+        result = ingest.ingest_youtube(db, params["url"])
+    ctx.progress(1, 1, "Stored")
+    return _captured(result, result["slug"])
 
 
 def handle_paste(params: dict, ctx: JobContext) -> dict:
-    return _ingest_job(ingest.ingest_paste, params, ctx, params["title"], params["text"])
+    ctx.progress(0, 1, "Storing text")
+    with session_scope() as db:
+        result = ingest.ingest_paste(db, params["title"], params["text"])
+    ctx.progress(1, 1, "Stored")
+    return _captured(result, result["slug"])
 
 
 def handle_transcribe(params: dict, ctx: JobContext) -> dict:
@@ -75,8 +72,7 @@ def handle_transcribe(params: dict, ctx: JobContext) -> dict:
     ctx.progress(3, 4, "Storing transcript")
     with session_scope() as db:
         result = transcribe.store_transcript(db, meta, transcript)
-    result["summaries"] = _summarize(result["slug"], ctx, params.get("summarize", True))
-    return result
+    return _captured(result, result["slug"])
 
 
 def handle_crawl(params: dict, ctx: JobContext) -> dict:
@@ -90,16 +86,7 @@ def handle_crawl(params: dict, ctx: JobContext) -> dict:
             on_progress=ctx.progress,
             should_stop=ctx.should_stop,
         )
-    # Summarizing a whole crawl is one model call per page, so it stays opt-in.
-    if params.get("summarize"):
-        notes = []
-        for i, slug in enumerate(result["created"], start=1):
-            if ctx.should_stop():
-                break
-            ctx.progress(i, len(result["created"]), f"Summarizing {slug}")
-            notes.extend(_summarize(slug, ctx, True))
-        result["summaries"] = notes
-    return result
+    return _captured(result, *result.get("created", []))
 
 
 def handle_pdf(params: dict, ctx: JobContext) -> dict:
@@ -121,16 +108,59 @@ def handle_pdf(params: dict, ctx: JobContext) -> dict:
         with session_scope() as db:
             result = ingest.ingest_pdf(db, path, params.get("title"), params.get("filename"))
     ctx.progress(1, 2, "Stored")
-    result["summaries"] = _summarize(result["slug"], ctx, params.get("summarize", True))
-    return result
+    return _captured(result, result["slug"])
+
+
+def handle_youtube_channel(params: dict, ctx: JobContext) -> dict:
+    """Expand a channel or playlist into one ingest job per video."""
+    from wiki_api.jobs.runner import enqueue
+
+    ctx.progress(0, 1, "Listing videos")
+    videos = ingest.list_channel_videos(params["url"], limit=params.get("limit"))
+    if not videos:
+        raise ValueError("No videos found at that URL")
+
+    queued = 0
+    with session_scope() as db:
+        for i, v in enumerate(videos, start=1):
+            ctx.progress(i, len(videos), f"Queueing {v['title'][:60]}")
+            enqueue(
+                db,
+                "youtube",
+                {
+                    "url": f"https://www.youtube.com/watch?v={v['id']}",
+                    "moc": params.get("moc"),
+                    "moc_title": params.get("moc_title"),
+                    "distill": params.get("distill", True),
+                },
+            )
+            queued += 1
+    return {"videos": len(videos), "queued": queued, "titles": [v["title"] for v in videos[:5]]}
+
+
+def handle_distill(params: dict, ctx: JobContext) -> dict:
+    """Connect a captured source to the rest of the wiki."""
+    from wiki_api.services.content import get_doc
+
+    ctx.progress(0, 2, "Reading the source")
+    with session_scope() as db:
+        source = get_doc(db, params["source_slug"])
+        if source is None:
+            raise ValueError(f"Nothing found at '{params['source_slug']}'")
+        ctx.progress(1, 2, "Extracting concepts and linking")
+        result = distill.distill(
+            db,
+            source,
+            moc_slug=params.get("moc"),
+            moc_title=params.get("moc_title"),
+        )
+    ctx.progress(2, 2, "Linked")
+    return result.as_dict()
 
 
 def handle_summarize(params: dict, ctx: JobContext) -> dict:
-    ctx.progress(0, 1, "Asking the model")
-    with session_scope() as db:
-        result = ingest.ai_summarize(db, params["source_slug"])
-    ctx.progress(1, 1, "Wrote literature note")
-    return result
+    """Re-run distillation for one source, on demand."""
+    return handle_distill({"source_slug": params["source_slug"], **params}, ctx)
 
 
 def handle_import(params: dict, ctx: JobContext) -> dict:
@@ -146,10 +176,12 @@ HANDLERS: dict[str, JobHandler] = {
     "web": handle_web,
     "arxiv": handle_arxiv,
     "youtube": handle_youtube,
+    "youtube-channel": handle_youtube_channel,
     "transcribe": handle_transcribe,
     "crawl": handle_crawl,
     "pdf": handle_pdf,
     "paste": handle_paste,
+    "distill": handle_distill,
     "summarize": handle_summarize,
     "import": handle_import,
 }

@@ -15,6 +15,9 @@ _CODE_RE = re.compile(r"```.*?```|~~~.*?~~~|`[^`\n]*`", re.DOTALL)
 
 def slugify(text: str) -> str:
     text = text.lower()
+    # Separators become word breaks. Deleting them outright turned "vanishing/exploding"
+    # into "vanishingexploding".
+    text = re.sub(r"[/\\&+,:]", " ", text)
     text = re.sub(r"[^a-z0-9\s-]", "", text)
     text = re.sub(r"[\s_]+", "-", text)
     return text.strip("-")[:80]

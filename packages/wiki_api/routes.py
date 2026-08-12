@@ -28,6 +28,7 @@ from wiki_api.services.content import (
     delete_doc,
     get_doc,
     list_docs,
+    log_action,
     outgoing_links,
     restore_revision,
     revisions,
@@ -36,6 +37,7 @@ from wiki_api.services.content import (
     to_dict,
     update_note,
 )
+from wiki_api.services.distill import UNREVIEWED
 from wiki_api.services.fetch import FetchError
 from wiki_api.services.graph import build_graph, orphans, stats
 from wiki_api.services.ingest import ai_query
@@ -264,6 +266,53 @@ def api_restore(
 def api_delete(slug: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     if not delete_doc(db, slug):
         raise HTTPException(404, f"Nothing found at '{slug}'")
+
+
+class ApproveBody(BaseModel):
+    slugs: list[str] = Field(default_factory=list, max_length=500)
+
+
+@router.get("/review")
+def api_review_queue(
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Notes written by the pipeline and not yet confirmed by a human."""
+    rows = (
+        db.query(Document)
+        .filter(Document.tags.contains([UNREVIEWED]))
+        .order_by(Document.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    out = []
+    for d in rows:
+        src = db.get(Document, d.derived_from_id) if d.derived_from_id else None
+        item = to_dict(d)
+        item["preview"] = (d.body or "")[:400]
+        item["source"] = {"slug": src.slug, "title": src.title} if src else None
+        out.append(item)
+    total = db.query(Document).filter(Document.tags.contains([UNREVIEWED])).count()
+    return {"documents": out, "total": total}
+
+
+@router.post("/review/approve")
+def api_review_approve(
+    body: ApproveBody, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+):
+    """Drop the unreviewed tag. With no slugs given, approves everything pending."""
+    q = db.query(Document).filter(Document.tags.contains([UNREVIEWED]))
+    if body.slugs:
+        q = q.filter(Document.slug.in_(body.slugs))
+    approved = 0
+    for doc in q.all():
+        doc.tags = [t for t in (doc.tags or []) if t != UNREVIEWED]
+        approved += 1
+    db.commit()
+    if approved:
+        log_action(db, "review", f"Approved {approved} note(s)")
+    return {"approved": approved}
 
 
 # --- backup -------------------------------------------------------------------

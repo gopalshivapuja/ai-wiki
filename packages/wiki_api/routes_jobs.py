@@ -21,31 +21,41 @@ router = APIRouter()
 MAX_IMPORT_BYTES = 100_000_000
 
 
-class UrlBody(BaseModel):
+class Filing(BaseModel):
+    """Where the notes from this source should be filed."""
+
+    moc: str | None = Field(default=None, max_length=120)
+    moc_title: str | None = Field(default=None, max_length=200)
+    distill: bool = True
+
+
+class UrlBody(Filing):
     url: str = Field(min_length=1, max_length=2000)
-    summarize: bool = True
 
 
-class ArxivBody(BaseModel):
+class ArxivBody(Filing):
     id_or_url: str = Field(min_length=1, max_length=500)
 
 
-class CrawlBody(BaseModel):
+class CrawlBody(Filing):
     url: str = Field(min_length=1, max_length=2000)
     max_pages: int = Field(default=DEFAULT_MAX_PAGES, ge=1, le=HARD_MAX_PAGES)
     max_depth: int = Field(default=DEFAULT_MAX_DEPTH, ge=0, le=5)
     collection: str | None = Field(default=None, max_length=120)
-    summarize: bool = False
 
 
-class PasteBody(BaseModel):
+class PasteBody(Filing):
     title: str = Field(min_length=1, max_length=300)
     text: str = Field(min_length=1, max_length=1_000_000)
-    summarize: bool = False
 
 
-class SummarizeBody(BaseModel):
+class SummarizeBody(Filing):
     source_slug: str = Field(min_length=1, max_length=200)
+
+
+class ChannelBody(Filing):
+    url: str = Field(min_length=1, max_length=2000)
+    limit: int | None = Field(default=None, ge=1, le=500)
 
 
 def _submit(db: Session, kind: str, params: dict, payload: str | None = None) -> dict:
@@ -96,6 +106,14 @@ def job_transcribe(
     return _submit(db, "transcribe", body.model_dump())
 
 
+@router.post("/youtube-channel")
+def job_youtube_channel(
+    body: ChannelBody, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+):
+    """Queue every video on a channel or playlist. Re-running skips what is already stored."""
+    return _submit(db, "youtube-channel", body.model_dump())
+
+
 @router.post("/crawl")
 def job_crawl(
     body: CrawlBody, db: Session = Depends(get_db), user: User = Depends(get_current_user)
@@ -121,7 +139,8 @@ def job_summarize(
 async def job_pdf(
     file: UploadFile = File(...),
     title: str | None = Form(default=None),
-    summarize: bool = Form(default=True),
+    moc: str | None = Form(default=None),
+    moc_title: str | None = Form(default=None),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -133,7 +152,7 @@ async def job_pdf(
     return _submit(
         db,
         "pdf",
-        {"title": title, "filename": file.filename, "summarize": summarize},
+        {"title": title, "filename": file.filename, "moc": moc, "moc_title": moc_title},
         base64.b64encode(data).decode(),
     )
 
