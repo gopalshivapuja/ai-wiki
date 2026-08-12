@@ -31,7 +31,7 @@ This **Map of Content (MOC)** aggregates all atomic Zettel notes, foundational c
 - [[lora-low-rank-adaptation|LoRA Low-Rank Adaptation]] — Low-Rank matrix decomposition ($W_0 + BA$) for memory-efficient tuning.
 
 ## 4. Key Entities & Landmark Papers
-- [[Attention Is All You Need|Attention Is All You Need]] — Landmark 2017 paper by Vaswani et al. introducing Transformers.
+- [[Attention Is All You Need]] — Landmark 2017 paper by Vaswani et al. introducing Transformers.
 - [[openai]] — Pioneer of decoder-only GPT architecture.
 - [[meta-ai]] — Creators of LLaMA open-weights family & PyTorch.
 - [[hugging-face]] — Ecosystem host for `transformers` and `peft` libraries.
@@ -41,9 +41,9 @@ This **Map of Content (MOC)** aggregates all atomic Zettel notes, foundational c
 ## Architectural Dependency Graph
 ```mermaid
 flowchart TD
-    Paper["[[Attention Is All You Need|Attention Is All You Need]]"] --> ScaledAttn["[[scaled-dot-product-attention|Scaled Dot-Product Attention]]"]
-    ScaledAttn --> MultiHeadAttn["[[multi-head-attention|Multi-Head Attention]]"]
-    MultiHeadAttn --> Transformer["[[transformer-architecture]]"]
-    Transformer --> LoRA["[[lora-low-rank-adaptation|LoRA Low-Rank Adaptation]]"]
-    LoRA --> PEFT["[[fine-tuning-and-alignment]]"]
+    Paper["Attention Is All You Need"] --> ScaledAttn["Scaled Dot Product Attention"]
+    ScaledAttn --> MultiHeadAttn["Multi Head Attention"]
+    MultiHeadAttn --> Transformer["Transformer Architecture"]
+    Transformer --> LoRA["Lora Low Rank Adaptation"]
+    LoRA --> PEFT["Fine Tuning And Alignment"]
 ```

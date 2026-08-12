@@ -298,3 +298,42 @@ def api_ask(
         return ai_query(db, body.question)
     except Exception as exc:
         raise _fail(exc, "The model could not be reached") from exc
+
+
+@router.post("/llm/query/stream")
+def api_ask_stream(
+    body: QuestionBody, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+):
+    """Answer as newline-delimited JSON events: citations first, then text as it generates.
+
+    Retrieval takes ~0.3s while generation can take half a minute, so the sources appear
+    immediately and the prose fills in beneath rather than the page sitting blank.
+    """
+    import json
+
+    from wiki_core.llm import stream_llm
+
+    from wiki_api.services.ingest import NO_CONTEXT, SYSTEM_PROMPT, retrieve
+
+    prompt, citations = retrieve(db, body.question)
+
+    def events():
+        yield json.dumps({"type": "citations", "citations": citations}) + "\n"
+        if not prompt:
+            yield json.dumps({"type": "text", "text": NO_CONTEXT}) + "\n"
+            yield json.dumps({"type": "done"}) + "\n"
+            return
+        try:
+            for piece in stream_llm(prompt, SYSTEM_PROMPT):
+                yield json.dumps({"type": "text", "text": piece}) + "\n"
+            yield json.dumps({"type": "done"}) + "\n"
+        except Exception as exc:
+            logger.warning("Streamed answer failed: %s", exc)
+            yield json.dumps({"type": "error", "message": str(exc)}) + "\n"
+
+    return StreamingResponse(
+        events(),
+        media_type="application/x-ndjson",
+        # Proxies must not buffer this or the streaming is pointless.
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )

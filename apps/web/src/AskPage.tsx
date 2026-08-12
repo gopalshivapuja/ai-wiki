@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { askLLM, createDoc, docPath, getModelStatus, type DocClass } from './api';
+import { askLLMStream, createDoc, docPath, getModelStatus, type Citation } from './api';
 import { useAsync } from './hooks';
 import { Markdown } from './Markdown';
 
@@ -8,32 +8,51 @@ interface Answer {
   id: number;
   question: string;
   answer: string;
-  citations: { slug: string; title: string; doc_class: DocClass }[];
+  citations: Citation[];
+  streaming: boolean;
+  error?: string;
 }
 
 export function AskPage() {
   const [question, setQuestion] = useState('');
   const [history, setHistory] = useState<Answer[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
   const { data: models } = useAsync(() => getModelStatus(), []);
   const navigate = useNavigate();
+  const abortRef = useRef<(() => void) | null>(null);
 
-  const ask = async (e: React.FormEvent) => {
+  // Abandon an in-flight answer if the page goes away.
+  useEffect(() => () => abortRef.current?.(), []);
+
+  const update = (id: number, patch: Partial<Answer>) =>
+    setHistory((h) => h.map((a) => (a.id === id ? { ...a, ...patch } : a)));
+
+  const ask = (e: React.FormEvent) => {
     e.preventDefault();
     const q = question.trim();
-    if (!q) return;
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await askLLM(q);
-      setHistory((h) => [{ id: Date.now(), question: q, ...res }, ...h]);
-      setQuestion('');
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setLoading(false);
-    }
+    if (!q || busy) return;
+
+    const id = Date.now();
+    setHistory((h) => [
+      { id, question: q, answer: '', citations: [], streaming: true },
+      ...h,
+    ]);
+    setQuestion('');
+    setBusy(true);
+
+    abortRef.current = askLLMStream(q, {
+      onCitations: (citations) => update(id, { citations }),
+      onText: (chunk) =>
+        setHistory((h) => h.map((a) => (a.id === id ? { ...a, answer: a.answer + chunk } : a))),
+      onDone: () => {
+        update(id, { streaming: false });
+        setBusy(false);
+      },
+      onError: (message) => {
+        update(id, { streaming: false, error: message });
+        setBusy(false);
+      },
+    });
   };
 
   const saveAsNote = async (a: Answer) => {
@@ -44,14 +63,14 @@ export function AskPage() {
       const created = await createDoc({ title: a.question.slice(0, 120), body, type: 'zettel' });
       navigate(`/edit/${encodeURIComponent(created.slug)}`);
     } catch (err) {
-      setError((err as Error).message);
+      update(a.id, { error: (err as Error).message });
     }
   };
 
   const misconfigured = models && (!models.api_key_set || models.usable_count === 0);
 
   return (
-    <div className="container">
+    <div className="container reading">
       <h1>Ask your wiki</h1>
       <p className="muted">
         Answers come only from what you have added, with links to the notes they came from.
@@ -66,18 +85,12 @@ export function AskPage() {
             </p>
           ) : (
             <p className="small">
-              None of the configured models are available.
-              {models.invalid.length > 0 && (
-                <>
-                  {' '}
-                  Unknown to OpenRouter: <code>{models.invalid.join(', ')}</code>.
-                </>
-              )}
+              No model is currently available.
               {models.free_available.length > 0 && (
                 <>
                   {' '}
-                  Try <code>OPENROUTER_MODEL={models.free_available[0]}</code>, or leave it unset to
-                  auto-select.
+                  Try <code>OPENROUTER_MODEL={models.free_available[0]}</code>, or leave it unset
+                  to auto-select.
                 </>
               )}
             </p>
@@ -85,7 +98,7 @@ export function AskPage() {
         </div>
       )}
 
-      <form className="row gap" onSubmit={ask}>
+      <form className="row gap ask-form" onSubmit={ask}>
         <input
           value={question}
           onChange={(e) => setQuestion(e.target.value)}
@@ -94,13 +107,10 @@ export function AskPage() {
           maxLength={2000}
           autoFocus
         />
-        <button disabled={loading || !question.trim()}>{loading ? 'Thinking…' : 'Ask'}</button>
+        <button disabled={busy || !question.trim()}>{busy ? 'Thinking…' : 'Ask'}</button>
       </form>
 
-      {error && <p className="error">{error}</p>}
-      {loading && <p className="muted">Searching your notes and asking the model…</p>}
-
-      {history.length === 0 && !loading && (
+      {history.length === 0 && (
         <div className="empty-state">
           <p className="muted">Ask anything about the material you have collected.</p>
         </div>
@@ -109,33 +119,39 @@ export function AskPage() {
       {history.map((a) => (
         <section className="panel ask-answer" key={a.id}>
           <h2>{a.question}</h2>
-          <Markdown
-            content={a.answer}
-            // Citations are real documents, so they render as working links rather than
-            // the greyed-out dead links sources used to get.
-            links={a.citations.map((c) => ({
-              target: c.slug,
-              slug: c.slug,
-              display: c.title,
-              exists: true,
-            }))}
-          />
+
           {a.citations.length > 0 && (
-            <div className="citations">
-              <h3>Sources</h3>
-              <ul>
-                {a.citations.map((c) => (
-                  <li key={c.slug}>
-                    <Link to={docPath(c.slug)}>{c.title}</Link>
-                    <span className="badge">{c.doc_class}</span>
-                  </li>
-                ))}
-              </ul>
+            <div className="citations-inline">
+              <span className="muted small">Reading:</span>
+              {a.citations.map((c) => (
+                <Link key={c.slug} className="badge tag" to={docPath(c.slug)}>
+                  {c.title}
+                </Link>
+              ))}
             </div>
           )}
-          <button className="ghost small" onClick={() => saveAsNote(a)}>
-            Save as a note
-          </button>
+
+          {a.answer ? (
+            <Markdown
+              content={a.answer}
+              links={a.citations.flatMap((c) => [
+                { target: c.slug, slug: c.slug, display: c.title, exists: true },
+                // Models often cite by title rather than slug.
+                { target: c.title, slug: c.slug, display: c.title, exists: true },
+              ])}
+            />
+          ) : (
+            a.streaming && <p className="muted small">Searching your notes…</p>
+          )}
+
+          {a.streaming && a.answer && <span className="cursor-blink" aria-hidden="true" />}
+          {a.error && <p className="error small">{a.error}</p>}
+
+          {!a.streaming && a.answer && !a.error && (
+            <button className="ghost small" onClick={() => saveAsNote(a)}>
+              Save as a note
+            </button>
+          )}
         </section>
       ))}
     </div>

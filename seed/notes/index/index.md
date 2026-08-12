@@ -9,7 +9,7 @@ updated: '2026-08-10'
 
 # AI Knowledge Base — Master Index & Zettel Graph
 
-Welcome to the **AI Knowledge Base**, built using the the project conventions.
+Welcome to the **AI Knowledge Base**, built on the LLM Wiki pattern: sources are captured immutably, and every idea gets its own atomic note.
 This index catalogs all compiled Maps of Content (MOCs), atomic Zettel notes, concepts, entities, syntheses, and ingested raw sources.
 
 ---
@@ -20,7 +20,7 @@ This index catalogs all compiled Maps of Content (MOCs), atomic Zettel notes, co
 
 ---
 
-## 🧩 Atomic Zettel Notes (`wiki/atomic/`)
+## 🧩 Atomic Zettel Notes
 - [[scaled-dot-product-attention|Scaled Dot-Product Attention]] — Q/K/V similarity calculation and scaling factor mechanics.
 - [[multi-head-attention|Multi-Head Attention]] — Parallel linear projections across representation subspaces.
 - [[react-agent-loop|ReAct Agent Loop]] — Interleaved Thought-Action-Observation execution loop.
@@ -51,14 +51,15 @@ This index catalogs all compiled Maps of Content (MOCs), atomic Zettel notes, co
 
 ---
 
-## 📚 Ingested Sources & Summaries
-- [[Building Effective Agents|Building Effective Agents]] — Summary of Anthropic's engineering guide on agentic workflows and simple design patterns.
-  - Raw Web Source: `sources/web/building-effective-agents-anthropic.md`
-- [[Attention Is All You Need|Attention Is All You Need]] — Summary of the landmark 2017 Google paper introducing the Transformer.
-  - Raw PDF Source: `sources/pdfs/attention-is-all-you-need-paper.md`
+## 📚 Sources & Their Literature Notes
+
+Captured material is stored unchanged; the literature note beside it is the condensed reading.
+
+- [[building-effective-agents-anthropic|Building Effective Agents]] — literature note on Anthropic's guide to agentic workflows and simple design patterns.
+  - Captured source: [[Building Effective Agents|the original article]]
+- [[attention-is-all-you-need-paper|Attention Is All You Need]] — literature note on the landmark 2017 paper introducing the Transformer.
+  - Captured source: [[Attention Is All You Need|the original paper]]
 
 ---
 
 ## ⚙️ Meta & Operations
-- the project conventions — Schema specification, rules, and workflows for LLM Agents maintaining this wiki & Zettelkasten.
-- the LLM Wiki pattern — Foundational pattern design document for LLM Wiki.

@@ -17,6 +17,9 @@ export function useAsync<T>(fn: () => Promise<T>, deps: unknown[]) {
   useEffect(() => {
     let ignore = false;
     setLoading(true);
+    // Clear immediately: without this the first render after a dependency change still shows
+    // the previous result under the new route, which looked like the link had done nothing.
+    setData(null);
     fnRef
       .current()
       .then((result) => {

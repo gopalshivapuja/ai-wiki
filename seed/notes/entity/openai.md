@@ -35,7 +35,7 @@ tags:
 ---
 
 ## Related Entities & Concepts
-- [[anthropic]]
-- [[meta-ai]]
-- [[transformer-architecture]]
-- [[ai-agents-and-tools]]
+- [[anthropic]] — the closest comparable frontier lab.
+- [[meta-ai]] — the open-weights counterpoint to OpenAI's API-only model.
+- [[transformer-architecture]] — the architecture GPT scaled.
+- [[ai-agents-and-tools]] — function calling made tool-using agents practical.

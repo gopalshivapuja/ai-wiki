@@ -22,7 +22,7 @@ tags:
 
 ## 1. Core Agent Frameworks & Patterns
 
-As documented in [[Building Effective Agents|Building Effective Agents]], agentic systems generally fall into two broad categories:
+As documented in [[building-effective-agents-anthropic|Building Effective Agents]], agentic systems generally fall into two broad categories:
 
 ### A. Agentic Workflows (Deterministic)
 - **Prompt Chaining**: Breakdown of tasks into fixed step-by-step LLM calls.
@@ -48,8 +48,10 @@ As documented in [[Building Effective Agents|Building Effective Agents]], agenti
 ---
 
 ## Related Knowledge
-- [[Building Effective Agents|Building Effective Agents]]
-- [[retrieval-augmented-generation]]
-- [[state-of-ai-engineering]]
-- [[anthropic]]
-- [[openai]]
+- [[building-effective-agents-anthropic|Building Effective Agents]] — the summary this note's pattern vocabulary is drawn from.
+- [[retrieval-augmented-generation]] — how an agent gets facts it was not trained on.
+- [[state-of-ai-engineering]] — where agent design sits in the wider landscape.
+- [[anthropic]] — publishes the pattern guidance and the tool-use protocol used here.
+- [[openai]] — shipped the function-calling interface most tool loops target.
+- [[react-agent-loop]] — the reasoning loop this note describes, as its own note.
+- [[evaluator-optimizer-pattern]] — the generator-critic loop, as its own note.

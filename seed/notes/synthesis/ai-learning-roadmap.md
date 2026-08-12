@@ -22,7 +22,7 @@ A structured curriculum and learning pathway for mastering modern Artificial Int
 ## Phase 1: Foundations (Core Architecture & Math)
 1. **Transformer Deep Dive**: Understand Query, Key, Value mechanics, Multi-Head Attention, and positional embeddings.
    - Core Page: [[transformer-architecture]]
-   - Landmark Paper: [[Attention Is All You Need|Attention Is All You Need]]
+   - Landmark Paper: [[Attention Is All You Need]]
 2. **PyTorch & Model Weights**: Learn tensor operations, forward/backward passes, and loading weights via [[hugging-face]].
 
 ---
@@ -37,14 +37,14 @@ A structured curriculum and learning pathway for mastering modern Artificial Int
 ## Phase 3: Systems & Data Integration
 1. **RAG Architectures**: Implement chunking, vector embeddings, hybrid BM25 + dense search, and reranking.
    - Core Page: [[retrieval-augmented-generation]]
-2. **Knowledge Base Patterns**: Compare traditional vector RAG against structured, compounding the project conventions architectures.
+2. **Knowledge Base Patterns**: Compare traditional vector RAG against structured, compounding knowledge-base architectures.
 
 ---
 
 ## Phase 4: Autonomous Agents & Product Engineering
 1. **Agent Workflows**: Implement ReAct loops, prompt chaining, tool calling, and evaluator-optimizer feedback loops.
    - Core Page: [[ai-agents-and-tools]]
-   - Industry Standard: [[Building Effective Agents|Building Effective Agents]]
+   - Industry Standard: [[building-effective-agents-anthropic|Building Effective Agents]]
 2. **Ecosystem & Frontier Models**: Track state-of-the-art models across [[openai]], [[anthropic]], and open-weights releases from [[meta-ai]].
 
 ---

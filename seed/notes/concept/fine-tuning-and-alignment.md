@@ -17,7 +17,7 @@ tags:
 
 # Fine-Tuning and Alignment
 
-**Fine-Tuning and Alignment** refer to the techniques used to adapt pre-trained base base models ([[transformer-architecture]]) to follow instructions safely, perform specific tasks, and align with human intent and preferences.
+**Fine-Tuning and Alignment** refer to the techniques used to adapt pre-trained base models ([[transformer-architecture]]) to follow instructions safely, perform specific tasks, and align with human intent and preferences.
 
 ---
 
@@ -42,8 +42,9 @@ Full fine-tuning updates billions of model parameters, requiring massive VRAM. P
 ---
 
 ## Related Knowledge
-- [[transformer-architecture]]
-- [[openai]]
-- [[anthropic]]
-- [[hugging-face]]
-- [[ai-learning-roadmap]]
+- [[transformer-architecture]] — the architecture every technique here adapts.
+- [[openai]] — productionised RLHF for instruction following.
+- [[anthropic]] — developed Constitutional AI as an alternative to human preference labelling.
+- [[hugging-face]] — maintains `peft`, the reference implementation of these methods.
+- [[ai-learning-roadmap]] — places adaptation after architecture in the learning order.
+- [[lora-low-rank-adaptation]] — the low-rank method summarised above, in full detail.

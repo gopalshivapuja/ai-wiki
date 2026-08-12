@@ -32,7 +32,8 @@ export function EditorPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
-  const [links, setLinks] = useState<WikiLink[]>([]);
+  // Links are resolved live against every document, so a wikilink typed a second ago
+  // previews correctly — the saved document's link list is always one edit behind.
 
   const all = useAsync(() => listDocs(), []);
   const existing = useAsync(async () => (isNew ? null : getDoc(slug)), [slug, isNew]);
@@ -48,7 +49,6 @@ export function EditorPage() {
     setBody(doc.body);
     setType(doc.type);
     setTags((doc.tags || []).join(', '));
-    setLinks(doc.links || []);
   }, [existing.data]);
 
   // Warn before losing unsaved edits to a refresh or a closed tab.
@@ -61,6 +61,25 @@ export function EditorPage() {
     window.addEventListener('beforeunload', handler);
     return () => window.removeEventListener('beforeunload', handler);
   }, [dirty]);
+
+  const previewLinks: WikiLink[] = useMemo(() => {
+    const docs = all.data?.documents ?? [];
+    const bySlug = new Set(docs.map((d) => d.slug));
+    const byTitle = new Map(docs.map((d) => [d.title.toLowerCase(), d.slug]));
+    const seen = new Set<string>();
+    const out: WikiLink[] = [];
+    for (const m of body.matchAll(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g)) {
+      const target = m[1].trim();
+      if (seen.has(target)) continue;
+      seen.add(target);
+      const slug = bySlug.has(target)
+        ? target
+        : byTitle.get(target.toLowerCase()) ??
+          (bySlug.has(`src-${target}`) ? `src-${target}` : null);
+      out.push({ target, slug, display: m[2] || target, exists: slug !== null });
+    }
+    return out;
+  }, [body, all.data]);
 
   const suggestions: Suggestion[] = useMemo(() => {
     if (!autocomplete) return [];
@@ -262,7 +281,7 @@ export function EditorPage() {
           )}
         </div>
         <div className="editor-pane preview">
-          <Markdown content={body} links={links} />
+          <Markdown content={body} links={previewLinks} />
         </div>
       </div>
     </div>

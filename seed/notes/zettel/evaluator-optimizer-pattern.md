@@ -43,5 +43,5 @@ The **Evaluator-Optimizer Pattern** is a two-role LLM workflow where one model (
 
 - [[react-agent-loop|ReAct Agent Loop]] — Dynamic environment interaction loop.
 - [[ai-agents-and-tools]] — Overview of workflow patterns.
-- [[Building Effective Agents|Building Effective Agents]] — Source document introducing Evaluator-Optimizer feedback design.
+- [[building-effective-agents-anthropic|Building Effective Agents]] — Source document introducing Evaluator-Optimizer feedback design.
 - [[moc-agentic-patterns]] — Map of Content for agent workflows.

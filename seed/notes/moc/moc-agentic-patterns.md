@@ -26,10 +26,10 @@ This **Map of Content (MOC)** aggregates all atomic Zettel notes, system concept
 
 ## 2. High-Level Concept Overviews
 - [[ai-agents-and-tools]] — ReAct loops, tool registries, short-term vs long-term memory, multi-agent coordination.
-- [[retrieval-augmented-generation]] — Knowledge retrieval paradigms (vector RAG vs persistent the project conventions).
+- [[retrieval-augmented-generation]] — Knowledge retrieval paradigms (vector RAG versus a persistent curated wiki).
 
 ## 3. Structural Overviews & Guides
-- [[Building Effective Agents|Building Effective Agents]] — Anthropic's authoritative guide on composable agent workflows vs autonomous loops.
+- [[building-effective-agents-anthropic|Building Effective Agents]] — Anthropic's authoritative guide on composable agent workflows vs autonomous loops.
 - [[state-of-ai-engineering]] — Comparative analysis of agent frameworks and frontier model capabilities.
 
 ## 4. Key Entities
@@ -41,8 +41,8 @@ This **Map of Content (MOC)** aggregates all atomic Zettel notes, system concept
 ## Agent Architecture Map
 ```mermaid
 flowchart LR
-    Guide["[[Building Effective Agents|Building Effective Agents]]"] --> Overview["[[ai-agents-and-tools]]"]
-    Overview --> ReAct["[[react-agent-loop|ReAct Agent Loop]]"]
-    Overview --> EvalOpt["[[evaluator-optimizer-pattern|Evaluator-Optimizer Pattern]]"]
-    ReAct --> WikiStore["[[retrieval-augmented-generation]] / the project conventions"]
+    Guide["Building Effective Agents"] --> Overview["Ai Agents And Tools"]
+    Overview --> ReAct["React Agent Loop"]
+    Overview --> EvalOpt["Evaluator Optimizer Pattern"]
+    ReAct --> WikiStore["Retrieval-Augmented Generation / curated wiki"]
 ```

@@ -26,6 +26,15 @@ PREFERRED_FREE_HINTS = ("deepseek", "llama", "qwen", "mistral", "gemma", "phi")
 _models_cache: dict = {"at": 0.0, "ids": [], "error": None}
 _cache_lock = threading.Lock()
 
+# model id -> unix time until which we treat it as rate limited.
+_rate_limited: dict[str, float] = {}
+RATE_LIMIT_COOLDOWN = 600
+
+# A model that has not produced its first byte by now is not worth waiting for when there
+# are a dozen alternatives.
+FIRST_TOKEN_TIMEOUT = 25
+MAX_ATTEMPTS = 4
+
 
 class LLMNotConfigured(RuntimeError):
     """No usable model or API key. The message is safe to show the user."""
@@ -97,7 +106,11 @@ def get_models() -> list[str]:
     free = [m for m in available if m.endswith(":free") and m not in ordered]
     free.sort(key=lambda m: next((i for i, h in enumerate(PREFERRED_FREE_HINTS) if h in m), 99))
     ordered.extend(free)
-    return ordered
+
+    # Models that just rate-limited us go to the back. Without this every question paid the
+    # same two failed round trips before reaching one that answers.
+    now = time.time()
+    return sorted(ordered, key=lambda m: _rate_limited.get(m, 0) > now)
 
 
 def model_status() -> dict:
@@ -118,29 +131,29 @@ def model_status() -> dict:
     }
 
 
-def call_llm(prompt: str, system: str = "You are a helpful AI assistant.") -> str:
+def _prepare(prompt: str, system: str) -> tuple[str, dict, list[str]]:
     key = get_api_key()
     if not key:
         raise LLMNotConfigured(
             "OPENROUTER_API_KEY is not set. Add it to the environment to enable AI features."
         )
-
     models = get_models()
     if not models:
         raise LLMNotConfigured(
             "No usable model. Set OPENROUTER_MODEL to an id from https://openrouter.ai/models."
         )
-
     headers = {
         "Authorization": f"Bearer {key}",
         "HTTP-Referer": "https://github.com/gopalshivapuja/ai-wiki",
         "X-Title": "LLM Wiki",
         "Content-Type": "application/json",
     }
-    attempts: list[str] = []
+    return key, headers, models[:MAX_ATTEMPTS]
 
-    for model in models[:6]:
-        payload = {
+
+def _body(model: str, prompt: str, system: str, stream: bool) -> bytes:
+    return json.dumps(
+        {
             "model": model,
             "messages": [
                 {"role": "system", "content": system},
@@ -148,15 +161,40 @@ def call_llm(prompt: str, system: str = "You are a helpful AI assistant.") -> st
             ],
             "temperature": 0.3,
             "max_tokens": 2048,
+            "stream": stream,
         }
+    ).encode()
+
+
+def _note_failure(model: str, exc: urllib.error.HTTPError, attempts: list[str]) -> None:
+    detail = exc.read().decode("utf-8", errors="ignore")[:200] if exc.fp else ""
+    attempts.append(f"{model}: HTTP {exc.code} {detail}")
+    if exc.code in (429, 402):
+        _rate_limited[model] = time.time() + RATE_LIMIT_COOLDOWN
+        logger.info("%s is rate limited; deprioritised for %ds", model, RATE_LIMIT_COOLDOWN)
+
+
+def _exhausted(attempts: list[str]) -> LLMNotConfigured:
+    logger.error("All models failed: %s", "; ".join(attempts))
+    return LLMNotConfigured(
+        "Every available model failed or is rate limited right now. Free models allow 1,000 "
+        "requests/day after a one-time $10 credit purchase. See /api/llm/models."
+    )
+
+
+def call_llm(prompt: str, system: str = "You are a helpful AI assistant.") -> str:
+    _key, headers, models = _prepare(prompt, system)
+    attempts: list[str] = []
+
+    for model in models:
         try:
             req = urllib.request.Request(
                 f"{API_BASE}/chat/completions",
-                data=json.dumps(payload).encode(),
+                data=_body(model, prompt, system, stream=False),
                 headers=headers,
                 method="POST",
             )
-            with urllib.request.urlopen(req, timeout=90) as resp:
+            with urllib.request.urlopen(req, timeout=120) as resp:
                 data = json.loads(resp.read().decode())
             text = (data["choices"][0]["message"]["content"] or "").strip()
             if text:
@@ -164,15 +202,54 @@ def call_llm(prompt: str, system: str = "You are a helpful AI assistant.") -> st
                 return text
             attempts.append(f"{model}: empty response")
         except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="ignore")[:200] if exc.fp else ""
-            attempts.append(f"{model}: HTTP {exc.code} {detail}")
-            if exc.code == 429:
-                logger.info("%s is rate limited, trying the next model", model)
+            _note_failure(model, exc, attempts)
         except Exception as exc:
             attempts.append(f"{model}: {exc}")
 
-    logger.error("All models failed: %s", "; ".join(attempts))
-    raise LLMNotConfigured(
-        "Every configured model failed. The free tier allows 50 requests/day (1,000 after a "
-        "one-time $10 credit purchase). Check /api/llm/models for details."
-    )
+    raise _exhausted(attempts)
+
+
+def stream_llm(prompt: str, system: str = "You are a helpful AI assistant."):
+    """Yield answer text as the model produces it.
+
+    Generation is the slow part — a free model can take half a minute — so showing the first
+    words immediately is the difference between "working" and "frozen".
+    """
+    _key, headers, models = _prepare(prompt, system)
+    attempts: list[str] = []
+
+    for model in models:
+        try:
+            req = urllib.request.Request(
+                f"{API_BASE}/chat/completions",
+                data=_body(model, prompt, system, stream=True),
+                headers={**headers, "Accept": "text/event-stream"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=FIRST_TOKEN_TIMEOUT) as resp:
+                produced = False
+                for raw in resp:
+                    line = raw.decode("utf-8", errors="ignore").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data)
+                        piece = chunk["choices"][0].get("delta", {}).get("content") or ""
+                    except (json.JSONDecodeError, KeyError, IndexError):
+                        continue
+                    if piece:
+                        produced = True
+                        yield piece
+            if produced:
+                logger.info("LLM streamed via %s", model)
+                return
+            attempts.append(f"{model}: empty stream")
+        except urllib.error.HTTPError as exc:
+            _note_failure(model, exc, attempts)
+        except Exception as exc:
+            attempts.append(f"{model}: {exc}")
+
+    raise _exhausted(attempts)

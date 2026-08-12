@@ -153,6 +153,7 @@ class LinkIndex:
     by_slug: dict[str, str]
     by_uid: dict[str, str]
     by_title: dict[str, str]
+    title_of: dict[str, str]
 
     def resolve(self, target: str) -> str | None:
         t = target.strip()
@@ -176,25 +177,36 @@ def build_link_index(db: Session) -> LinkIndex:
         by_slug={slug: slug for slug, _, _ in rows},
         by_uid={uid: slug for slug, uid, _ in rows if uid},
         by_title={title.casefold(): slug for slug, _, title in rows if title},
+        title_of={slug: title for slug, _, title in rows},
     )
 
 
 def outgoing_links(doc: Document, index: LinkIndex) -> list[dict]:
-    """Links leaving this document, flagged with whether the target exists (red links)."""
+    """Links leaving this document, flagged with whether the target exists (red links).
+
+    Keyed on the raw target, not the resolved slug: the frontend looks entries up by the
+    text written inside [[...]], so two spellings of the same destination must both appear.
+    Deduping by slug dropped the second one, and the renderer then fell back to treating the
+    raw text as a slug — a guaranteed 404. Self-links are reported too, so they can render
+    as plain text rather than a link to nowhere.
+    """
     seen: set[str] = set()
     out = []
     for link in parse_wikilinks(doc.body or ""):
-        resolved = index.resolve(link.target)
-        key = resolved or link.target
-        if key in seen or resolved == doc.slug:
+        target = link.target.strip()
+        if target in seen:
             continue
-        seen.add(key)
+        seen.add(target)
+        resolved = index.resolve(target)
         out.append(
             {
-                "target": link.target,
+                "target": target,
                 "slug": resolved,
-                "display": link.display or link.target,
+                # Fall back to the destination's real title rather than the raw slug, so a
+                # sidebar of links reads as prose instead of URL fragments.
+                "display": link.display or index.title_of.get(resolved or "", target),
                 "exists": resolved is not None,
+                "is_self": resolved is not None and resolved == doc.slug,
             }
         )
     return out
