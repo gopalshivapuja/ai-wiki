@@ -602,3 +602,18 @@ def test_slugify_treats_separators_as_word_breaks():
 
     assert slugify("Vanishing/Exploding Gradients") == "vanishing-exploding-gradients"
     assert slugify("Q, K & V") == "q-k-v"
+
+
+def test_import_does_not_redistil_a_restore(monkeypatch):
+    """Restoring a backup must not create a second literature note for every source."""
+    from wiki_api.jobs import runner
+
+    queued: list[dict] = []
+    monkeypatch.setattr(runner, "session_scope", lambda: __import__("contextlib").nullcontext(None))
+    monkeypatch.setattr(runner, "enqueue", lambda db, kind, params: queued.append(params))
+
+    runner._queue_distillation("import", {}, {"sources": ["src-a"]})
+    assert queued == [], "a restore should not re-distil"
+
+    runner._queue_distillation("import", {"distill": True}, {"sources": ["src-a"]})
+    assert [q["source_slug"] for q in queued] == ["src-a"]

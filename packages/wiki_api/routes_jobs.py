@@ -160,14 +160,24 @@ async def job_pdf(
 @router.post("/import")
 async def job_import(
     file: UploadFile = File(...),
+    distill: bool = Form(default=False),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """Restore an export, or import any folder of markdown with YAML frontmatter."""
+    """Restore an export, or import any folder of markdown with YAML frontmatter.
+
+    `distill` defaults to false because the usual case is a restore, whose notes arrive with
+    the archive. Set it when importing captured material that has no notes yet.
+    """
     if not (file.filename or "").lower().endswith(".zip"):
         raise HTTPException(400, "Upload a .zip archive")
     data = await _read_upload(file, MAX_IMPORT_BYTES)
-    return _submit(db, "import", {"filename": file.filename}, base64.b64encode(data).decode())
+    return _submit(
+        db,
+        "import",
+        {"filename": file.filename, "distill": distill},
+        base64.b64encode(data).decode(),
+    )
 
 
 @router.get("")

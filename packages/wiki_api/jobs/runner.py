@@ -154,7 +154,10 @@ def _queue_distillation(kind: str, params: dict, result: object) -> None:
     """
     if kind == "distill" or not isinstance(result, dict):
         return
-    if not params.get("distill", True):
+    # Import defaults to off: the common case is restoring a backup, whose notes come with
+    # it, and re-distilling would create a second literature note for every source. Pass
+    # distill=true when importing freshly captured material that has no notes yet.
+    if not params.get("distill", kind != "import"):
         return
     sources = [s for s in (result.get("sources") or []) if s]
     if not sources:
