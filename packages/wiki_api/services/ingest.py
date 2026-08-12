@@ -7,6 +7,7 @@ import logging
 import re
 import urllib.parse
 from pathlib import Path
+from urllib.request import urlopen
 
 from sqlalchemy.orm import Session
 from wiki_core.llm import call_llm
@@ -199,34 +200,94 @@ _BLOCKED_SIGNS = (
 )
 
 
+_CAPTION_LANGS = ("en", "en-US", "en-GB", "en-orig")
+
+
+def _captions_via_ytdlp(vid: str) -> str | None:
+    """Read captions through yt-dlp's player negotiation.
+
+    A second route, not a retry: yt-dlp asks the player for caption tracks, while
+    youtube-transcript-api hits the timedtext endpoint directly. When the whole 62-video
+    channel came back "IpBlocked" on the direct endpoint, this path served every one of them.
+    """
+    try:
+        import yt_dlp
+    except ImportError:
+        return None
+
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "writesubtitles": True,
+        "writeautomaticsub": True,
+    }
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(f"https://www.youtube.com/watch?v={vid}", download=False)
+
+    tracks = {**(info.get("subtitles") or {}), **(info.get("automatic_captions") or {})}
+    lang = next((k for k in _CAPTION_LANGS if k in tracks), None)
+    if not lang:
+        return None
+    fmt = next((f for f in tracks[lang] if f.get("ext") == "json3"), None)
+    if not fmt:
+        return None
+
+    with urlopen(fmt["url"], timeout=90) as response:  # the URL comes from yt-dlp
+        data = json.loads(response.read())
+
+    lines: list[str] = []
+    for event in data.get("events") or []:
+        text = "".join(seg.get("utf8", "") for seg in (event.get("segs") or [])).strip()
+        # Auto-captions scroll, repeating the previous line; keep a single copy of each.
+        if text and (not lines or lines[-1] != text):
+            lines.append(text)
+    return "\n".join(lines).strip() or None
+
+
 def fetch_youtube_transcript(vid: str) -> str | None:
     """Fetch captions. Returns None only when the video genuinely has none.
 
-    Raises CaptionsBlocked when YouTube refuses us — which is what happens from a cloud
-    host. Reporting that as "no captions" sent people toward speech-to-text, which costs
-    money and is blocked from the same address.
+    Two routes are tried before giving up, because the direct caption endpoint is blocked for
+    cloud IP ranges. Raises CaptionsBlocked only when both refuse — reporting a block as "no
+    captions" sent people toward speech-to-text, which costs money and is refused from the
+    same address.
     """
+    blocked_detail: str | None = None
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
-    except ImportError:
-        logger.warning("youtube-transcript-api is not installed")
-        return None
-    try:
+
         fetched = YouTubeTranscriptApi().fetch(vid)
         snippets = getattr(fetched, "snippets", fetched)
         parts = [(s.text if hasattr(s, "text") else s.get("text", "")) for s in snippets]
-        return "\n".join(p for p in parts if p).strip() or None
+        if text := "\n".join(p for p in parts if p).strip():
+            return text
+    except ImportError:
+        logger.warning("youtube-transcript-api is not installed")
     except Exception as exc:
         detail = f"{type(exc).__name__}: {exc}"
         if any(sign in detail.lower() for sign in _BLOCKED_SIGNS):
-            logger.warning("YouTube refused captions for %s: %s", vid, detail[:200])
-            raise CaptionsBlocked(
-                "YouTube is refusing caption requests from this server — cloud IP ranges are "
-                "commonly blocked. Fetch the captions from a home connection and import them, "
-                "rather than paying for speech-to-text that will be refused too."
-            ) from exc
-        logger.info("No captions for %s: %s", vid, detail[:200])
-        return None
+            blocked_detail = detail[:200]
+            logger.warning("Caption endpoint refused %s, trying yt-dlp: %s", vid, blocked_detail)
+        else:
+            logger.info("No captions via transcript API for %s: %s", vid, detail[:200])
+
+    try:
+        if text := _captions_via_ytdlp(vid):
+            return text
+    except Exception as exc:  # fall through to the honest error below
+        detail = f"{type(exc).__name__}: {exc}"
+        logger.warning("yt-dlp caption fetch failed for %s: %s", vid, detail[:200])
+        if any(sign in detail.lower() for sign in _BLOCKED_SIGNS):
+            blocked_detail = detail[:200]
+
+    if blocked_detail:
+        raise CaptionsBlocked(
+            "YouTube refused caption requests from this server on both available routes — "
+            "cloud IP ranges are commonly blocked. Fetch the captions from a home connection "
+            "and import them, rather than paying for speech-to-text that will be refused too."
+        )
+    return None
 
 
 def ingest_youtube(db: Session, url_or_id: str) -> dict:

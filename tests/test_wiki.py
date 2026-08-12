@@ -628,3 +628,51 @@ def test_normalisation_folds_ml_suffixes():
     assert _normalise("Recurrent Neural Network") == _normalise("Recurrent Neural Networks")
     # Genuinely different ideas must stay apart.
     assert _normalise("Positional Encoding") != _normalise("Rotary Positional Encoding")
+
+
+def test_blocked_captions_fall_back_to_ytdlp(monkeypatch):
+    """The direct caption endpoint is IP-blocked for cloud hosts; yt-dlp is the second route."""
+    from wiki_api.services import ingest
+
+    def refuse(_vid):
+        raise RuntimeError("IpBlocked: YouTube is blocking requests from your IP")
+
+    monkeypatch.setattr(ingest, "_captions_via_ytdlp", lambda vid: "recovered transcript")
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "youtube_transcript_api",
+        type("m", (), {"YouTubeTranscriptApi": type("A", (), {"fetch": staticmethod(refuse)})}),
+    )
+    assert ingest.fetch_youtube_transcript("abc") == "recovered transcript"
+
+
+def test_both_caption_routes_blocked_is_reported_as_a_block(monkeypatch):
+    """A block must never be reported as "no captions" — that sends users to paid STT."""
+    from wiki_api.services import ingest
+
+    def refuse(_vid):
+        raise RuntimeError("IpBlocked: YouTube is blocking requests from your IP")
+
+    monkeypatch.setattr(ingest, "_captions_via_ytdlp", lambda vid: None)
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "youtube_transcript_api",
+        type("m", (), {"YouTubeTranscriptApi": type("A", (), {"fetch": staticmethod(refuse)})}),
+    )
+    with pytest.raises(ingest.CaptionsBlocked):
+        ingest.fetch_youtube_transcript("abc")
+
+
+def test_video_with_genuinely_no_captions_returns_none(monkeypatch):
+    from wiki_api.services import ingest
+
+    def absent(_vid):
+        raise RuntimeError("NoTranscriptFound: this video has no captions")
+
+    monkeypatch.setattr(ingest, "_captions_via_ytdlp", lambda vid: None)
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "youtube_transcript_api",
+        type("m", (), {"YouTubeTranscriptApi": type("A", (), {"fetch": staticmethod(absent)})}),
+    )
+    assert ingest.fetch_youtube_transcript("abc") is None
