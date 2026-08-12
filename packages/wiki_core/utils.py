@@ -5,7 +5,11 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-WIKILINK_RE = re.compile(r"\[\[([^\]\|]+)(?:\|([^\]]+))?\]\]")
+# The trailing (?!\() rejects a markdown link whose text is itself bracketed:
+# "[[email protected]](https://…)" is one such link, not a wikilink to "email protected".
+# Cloudflare writes that markup on every page it protects, and crawling documentation sites
+# produced 37 phantom edges to a note that could never exist.
+WIKILINK_RE = re.compile(r"\[\[([^\]\|]+)(?:\|([^\]]+))?\]\](?!\()")
 
 # Fenced blocks and inline code. Their contents are shown verbatim, so any [[...]] inside is
 # illustration — a mermaid node label, a code sample — not a link. Counting them inflated the

@@ -676,3 +676,14 @@ def test_video_with_genuinely_no_captions_returns_none(monkeypatch):
         type("m", (), {"YouTubeTranscriptApi": type("A", (), {"fetch": staticmethod(absent)})}),
     )
     assert ingest.fetch_youtube_transcript("abc") is None
+
+
+def test_bracketed_markdown_link_is_not_a_wikilink():
+    """Cloudflare's obfuscated emails made 37 phantom edges to "email protected"."""
+    from wiki_core.utils import count_wikilinks, parse_wikilinks
+
+    text = "Mail [[email protected]](https://x.com/cdn-cgi/l/email-protection) about it."
+    assert parse_wikilinks(text) == []
+    assert count_wikilinks(text) == 0
+    # A genuine link, including one followed by prose in parentheses, still counts.
+    assert len(parse_wikilinks("See [[transformer]] and [[rag|RAG]].")) == 2
