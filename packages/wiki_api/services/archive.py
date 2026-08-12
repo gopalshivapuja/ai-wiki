@@ -93,7 +93,7 @@ def import_archive(db: Session, data: bytes, on_progress: ProgressFn | None = No
     if len(names) > MAX_IMPORT_FILES:
         raise ValueError(f"Archive holds more than {MAX_IMPORT_FILES} files")
 
-    imported, failed = 0, []
+    imported, failed, sources = 0, [], []
     import tempfile
 
     with tempfile.TemporaryDirectory(prefix="wiki-import-") as tmp:
@@ -107,15 +107,19 @@ def import_archive(db: Session, data: bytes, on_progress: ProgressFn | None = No
                 target = tmpdir / Path(name).name
                 target.write_bytes(zf.read(name))
                 hint = _subtype_hint(name)
-                if import_markdown(db, target, subtype_hint=hint):
+                doc = import_markdown(db, target, subtype_hint=hint)
+                if doc:
                     imported += 1
+                    if doc.doc_class == SOURCE:
+                        sources.append(doc.slug)
                 target.unlink(missing_ok=True)
             except Exception as exc:
                 logger.warning("Import failed for %s: %s", name, exc)
                 failed.append({"file": name, "error": str(exc)[:200]})
 
     log_action(db, "import", f"Imported {imported} documents from an archive")
-    return {"imported": imported, "failed": failed, "total": len(names)}
+    # Reported so the runner distils them, like any other capture route.
+    return {"imported": imported, "failed": failed, "total": len(names), "sources": sources}
 
 
 def _subtype_hint(archive_name: str) -> str | None:

@@ -183,12 +183,28 @@ def fetch_youtube_metadata(vid: str) -> dict:
         return {}
 
 
-def fetch_youtube_transcript(vid: str) -> str | None:
-    """Fetch captions, or None when the video has none.
+class CaptionsBlocked(FetchError):
+    """YouTube refused the request. Not the same as a video having no captions."""
 
-    youtube-transcript-api 1.x removed the get_transcript classmethod in favour of an
-    instance .fetch(); the old call failed for every video and the error was swallowed into
-    the stored body.
+
+# Phrases YouTube uses when it is refusing a datacenter IP rather than reporting an absence.
+_BLOCKED_SIGNS = (
+    "ipblocked",
+    "requestblocked",
+    "too many requests",
+    "sign in to confirm",
+    "not a bot",
+    "blocked",
+    "429",
+)
+
+
+def fetch_youtube_transcript(vid: str) -> str | None:
+    """Fetch captions. Returns None only when the video genuinely has none.
+
+    Raises CaptionsBlocked when YouTube refuses us — which is what happens from a cloud
+    host. Reporting that as "no captions" sent people toward speech-to-text, which costs
+    money and is blocked from the same address.
     """
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
@@ -201,7 +217,15 @@ def fetch_youtube_transcript(vid: str) -> str | None:
         parts = [(s.text if hasattr(s, "text") else s.get("text", "")) for s in snippets]
         return "\n".join(p for p in parts if p).strip() or None
     except Exception as exc:
-        logger.info("No transcript for %s: %s", vid, exc)
+        detail = f"{type(exc).__name__}: {exc}"
+        if any(sign in detail.lower() for sign in _BLOCKED_SIGNS):
+            logger.warning("YouTube refused captions for %s: %s", vid, detail[:200])
+            raise CaptionsBlocked(
+                "YouTube is refusing caption requests from this server — cloud IP ranges are "
+                "commonly blocked. Fetch the captions from a home connection and import them, "
+                "rather than paying for speech-to-text that will be refused too."
+            ) from exc
+        logger.info("No captions for %s: %s", vid, detail[:200])
         return None
 
 
