@@ -477,3 +477,26 @@ def test_question_retrieval_uses_any_term_matching(client, auth):
         loose = search(db, question, match_all=False, top_k=5)
     assert loose, "question retrieval returned nothing"
     assert any("attention" in r["slug"] for r in loose)
+
+
+def test_literature_note_slug_is_clean(client, auth):
+    """Deriving it from the note title produced `summary-source-summary-pep-20`."""
+    from wiki_api.database import session_scope
+    from wiki_api.services.content import get_doc, store_source, upsert_literature_note
+
+    with session_scope() as db:
+        src, _ = store_source(db, title="PEP 20", body="x", subtype="web", url="https://e.test/p")
+        note = upsert_literature_note(db, src, "Source summary: PEP 20", "body", [])
+        assert note.slug == "summary-pep-20", note.slug
+        assert note.derived_from_id == src.id
+
+        # Re-summarizing updates the same note rather than making a second one.
+        again = upsert_literature_note(db, src, "Source summary: PEP 20", "new body", [])
+        assert again.slug == note.slug
+        assert again.body == "new body"
+
+        from wiki_api.services.content import delete_doc
+
+        delete_doc(db, note.slug)
+        delete_doc(db, src.slug)
+        assert get_doc(db, note.slug) is None

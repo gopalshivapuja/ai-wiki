@@ -413,7 +413,10 @@ def upsert_literature_note(
         db.refresh(existing)
         return existing
 
-    base = note_slug(f"summary {title}") or f"summary-{source.slug}"
+    # Derived from the source's slug, not the note's title — the title already begins with
+    # "Source summary:", which produced slugs like `summary-source-summary-pep-20`.
+    stem = source.slug.removeprefix(SOURCE_PREFIX)
+    base = f"summary-{stem}"[:MAX_SLUG_LEN]
     slug, n = base, 2
     while get_doc(db, slug):
         slug = f"{base}-{n}"[:MAX_SLUG_LEN]
