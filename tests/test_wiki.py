@@ -1173,3 +1173,36 @@ def test_boot_sequence_survives_a_database_missing_the_new_columns(client):
     with engine.begin() as conn:
         role = conn.execute(text("SELECT role FROM users LIMIT 1")).scalar()
     assert role in ("admin", "reader")
+
+
+def test_redistillation_can_be_capped_to_linking_only(client, auth, monkeypatch):
+    """max_new=0 links concepts to existing notes and mints none.
+
+    Re-running distillation over material already processed should mostly connect what is
+    there; without a cap, 190 sources at six notes each could double the wiki.
+    """
+    from wiki_api.database import session_scope
+    from wiki_api.services import distill as D
+    from wiki_api.services.content import delete_doc, store_source
+
+    monkeypatch.setattr(
+        D,
+        "extract_concepts",
+        lambda source, limit=8: [D.Concept(name="Brand New Idea", summary="s", why="w")],
+    )
+    monkeypatch.setattr(D, "call_llm", lambda *a, **k: "A summary.")
+    monkeypatch.setattr(D, "_neighbours", lambda db, concept, k=3: [])
+    monkeypatch.setattr(D, "_embed_concept", lambda concept: None)
+
+    made = []
+    try:
+        with session_scope() as db:
+            src, _ = store_source(db, title="Cap Test Source", body="body", subtype="paste")
+            made.append(src.slug)
+            result = D.distill(db, src, max_new=0)
+            made += [result.literature_slug] if result.literature_slug else []
+            assert result.created == [], "max_new=0 must not create notes"
+    finally:
+        with session_scope() as db:
+            for slug in made:
+                delete_doc(db, slug)

@@ -51,6 +51,9 @@ class PasteBody(Filing):
 
 class SummarizeBody(Filing):
     source_slug: str = Field(min_length=1, max_length=200)
+    # Lower this when re-distilling material that has already been through the pipeline: the
+    # concepts mostly exist by then, so the useful work is linking them, not minting more.
+    max_new: int | None = Field(default=None, ge=0, le=12)
 
 
 class ChannelBody(Filing):

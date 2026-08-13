@@ -153,6 +153,9 @@ def handle_distill(params: dict, ctx: JobContext) -> dict:
             source,
             moc_slug=params.get("moc"),
             moc_title=params.get("moc_title"),
+            max_new=params.get("max_new")
+            if params.get("max_new") is not None
+            else distill.MAX_NEW_ZETTELS,
         )
     ctx.progress(2, 2, "Linked")
     return result.as_dict()
