@@ -1151,7 +1151,6 @@ def test_boot_sequence_survives_a_database_missing_the_new_columns(client):
     """
     import sqlalchemy.exc
     from sqlalchemy import text
-
     from wiki_api.database import engine, ensure_users, init_db
     from wiki_api.schema_ddl import apply_schema_ddl
 
