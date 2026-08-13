@@ -11,9 +11,8 @@ import { ThemeProvider, ThemeToggle } from './theme';
 import { NavSearch } from './SearchBar';
 import './index.css';
 
-// Two heavy dependency trees, neither needed to search: vis-network (~600KB) for the graph,
-// and the markdown + KaTeX pipeline (~450KB) for anything that renders a document body.
-const GraphPage = lazy(() => import('./GraphPage').then((m) => ({ default: m.GraphPage })));
+// The markdown + KaTeX pipeline (~450KB) is not needed to search, and vis-network (~600KB)
+// now loads only inside a document's Connections panel, and only once it is opened.
 const DocumentView = lazy(() => import('./DocumentView').then((m) => ({ default: m.DocumentView })));
 const EditorPage = lazy(() => import('./EditorPage').then((m) => ({ default: m.EditorPage })));
 const AskPage = lazy(() => import('./AskPage').then((m) => ({ default: m.AskPage })));
@@ -27,13 +26,12 @@ function Nav() {
   return (
     <nav className="nav">
       <Link to="/" className="logo">
-        <span aria-hidden="true">🧠</span> Wiki
+        ai<span className="logo-dot">·</span>wiki
       </Link>
       <div className="nav-search">
         <NavSearch />
       </div>
       <NavLink to="/browse">Browse</NavLink>
-      <NavLink to="/graph">Graph</NavLink>
       <NavLink to="/ask">Ask AI</NavLink>
       <NavLink to="/manage">Add source</NavLink>
       <div className="spacer" />
@@ -69,7 +67,6 @@ export default function App() {
             <Route path="/browse" element={guarded(<BrowsePage />)} />
             <Route path="/doc/:slug" element={guarded(<DocumentView />)} />
             <Route path="/edit/:slug" element={guarded(<EditorPage />)} />
-            <Route path="/graph" element={guarded(<GraphPage />)} />
             <Route path="/ask" element={guarded(<AskPage />)} />
             <Route path="/manage" element={guarded(<ManagePage />)} />
             <Route path="*" element={<NotFoundPage />} />

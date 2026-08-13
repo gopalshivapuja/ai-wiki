@@ -156,3 +156,72 @@ test.describe('ask ai', () => {
     console.log(`citations ${citationsAt}ms, first answer text ${firstTextAt}ms`);
   });
 });
+
+test.describe('finding your way in', () => {
+  test.beforeEach(async ({ page }) => login(page));
+
+  test('the home page offers hubs and a random note before you type', async ({ page }) => {
+    await page.goto(BASE);
+
+    // Maps of content are the curated way in; a bare search box only helps if you already
+    // know what to search for.
+    await expect(page.getByRole('heading', { name: 'Start here' })).toBeVisible();
+    const hubs = page.locator('.hub-card');
+    await expect(hubs.first()).toBeVisible();
+    expect(await hubs.count()).toBeGreaterThan(0);
+
+    const random = page.locator('.random-card');
+    await expect(random).toBeVisible();
+    const first = await random.locator('.random-title').innerText();
+
+    // "Another" must actually fetch a different note, not re-render the same one.
+    let changed = false;
+    for (let i = 0; i < 6 && !changed; i++) {
+      await page.getByRole('button', { name: /another/i }).click();
+      await expect(random).toBeVisible();
+      changed = (await random.locator('.random-title').innerText()) !== first;
+    }
+    expect(changed, 'refreshing never produced a different note').toBe(true);
+
+    // Clicking a hub opens it in the same tab.
+    await hubs.first().click();
+    await expect(page).toHaveURL(/\/doc\//);
+  });
+
+  test('a note draws its own neighbourhood, and the map opens on demand', async ({ page }) => {
+    await page.goto(`${BASE}/doc/vanishing-gradient`);
+
+    const panel = page.locator('.connections');
+    await expect(panel).toBeVisible();
+    // Collapsed by default: vis-network is ~600KB and most readers only want the note.
+    await expect(panel.locator('canvas')).toHaveCount(0);
+
+    await panel.getByRole('button', { name: /show map/i }).click();
+    await expect(panel.locator('canvas')).toBeVisible({ timeout: 20000 });
+
+    // The hop toggle is what makes it a neighbourhood rather than an atlas.
+    await expect(panel.getByRole('button', { name: '2 hops' })).toBeVisible();
+    await panel.getByRole('button', { name: '2 hops' }).click();
+    await expect(panel.locator('canvas')).toBeVisible({ timeout: 20000 });
+  });
+
+  test('the global graph page is gone', async ({ page }) => {
+    await page.goto(`${BASE}/graph`);
+    // The SPA catch-all renders Not found rather than a hairball.
+    await expect(page.locator('canvas')).toHaveCount(0);
+    await expect(page.getByRole('link', { name: 'Graph', exact: true })).toHaveCount(0);
+  });
+
+  test('browse leads with maps of content, not a wall of tags', async ({ page }) => {
+    await page.goto(`${BASE}/browse`);
+    const maps = page.getByRole('heading', { name: 'Maps of content' });
+    const tags = page.getByRole('heading', { name: 'Tags', exact: true });
+    await expect(maps).toBeVisible();
+    await expect(tags).toBeVisible();
+
+    // Order matters: hubs must come before tags on the page.
+    const mapsY = (await maps.boundingBox())!.y;
+    const tagsY = (await tags.boundingBox())!.y;
+    expect(mapsY).toBeLessThan(tagsY);
+  });
+});

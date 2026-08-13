@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
-import { docPath, getStats } from './api';
+import { docPath, getRandomNote, getStats, listDocs } from './api';
 import { useAsync, useSearch } from './hooks';
 import { Snippet } from './SearchBar';
 
@@ -32,18 +32,19 @@ export function HomePage() {
 
       {idle && (
         <>
-          <div className="quick-links">
-            <Link to="/browse">Browse all notes</Link>
-            <Link to="/graph">Knowledge graph</Link>
-            <Link to="/ask">Ask AI</Link>
-            <Link to="/manage">Add a source</Link>
-          </div>
           {stats && !empty && (
             <p className="muted small">
               {stats.total_notes} notes · {stats.total_sources} sources ·{' '}
               {stats.total_wikilinks} links
             </p>
           )}
+          {!empty && <StartHere />}
+          {!empty && <RandomNote />}
+          <div className="quick-links">
+            <Link to="/browse">Browse all notes</Link>
+            <Link to="/ask">Ask AI</Link>
+            <Link to="/manage">Add a source</Link>
+          </div>
           {empty && (
             <div className="empty-state">
               <p>Your wiki is empty.</p>
@@ -84,5 +85,57 @@ export function HomePage() {
         </div>
       )}
     </div>
+  );
+}
+
+/** The maps of content, as the way in.
+ *
+ * A search box only helps once you know what to search for. These are the curated entry
+ * points, and they are the honest answer to "where do I start" in a wiki of 400 notes. */
+function StartHere() {
+  const { data } = useAsync(() => listDocs({ type: 'moc', doc_class: 'note' }), []);
+  const mocs = data?.documents ?? [];
+  if (mocs.length === 0) return null;
+
+  return (
+    <section className="start-here">
+      <h2 className="section-label">Start here</h2>
+      <div className="hub-grid">
+        {mocs.map((m) => (
+          <Link className="hub-card" key={m.slug} to={docPath(m.slug)}>
+            <span className="hub-title">{m.title}</span>
+            <span className="muted small">map of content</span>
+          </Link>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+/** One note at random.
+ *
+ * The oldest Zettelkasten habit: you find the link you would never have thought to search
+ * for. Refreshes in place so it can be spun until something catches. */
+function RandomNote() {
+  const [nonce, setNonce] = useState(0);
+  const { data, loading } = useAsync(() => getRandomNote(), [nonce]);
+  if (!data && !loading) return null;
+
+  return (
+    <section className="random-note">
+      <div className="row space-between">
+        <h2 className="section-label">Something to read</h2>
+        <button className="ghost small" onClick={() => setNonce((n) => n + 1)}>
+          Another ↻
+        </button>
+      </div>
+      {data && (
+        <Link className="random-card" to={docPath(data.slug)}>
+          <span className="badge">{data.type}</span>
+          <span className="random-title">{data.title}</span>
+          {data.preview && <span className="muted small">{data.preview}</span>}
+        </Link>
+      )}
+    </section>
   );
 }

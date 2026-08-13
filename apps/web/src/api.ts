@@ -137,6 +137,17 @@ export interface GraphData {
   edges: { source: string; target: string }[];
 }
 
+export interface Neighbourhood extends GraphData {
+  center: string;
+  hops: number;
+  /** True when the neighbourhood was capped; what survives is ranked by connectedness. */
+  truncated: boolean;
+}
+
+export interface RandomNote extends DocSummary {
+  preview: string;
+}
+
 export interface Job {
   id: number;
   kind: string;
@@ -241,6 +252,11 @@ export const restoreRevision = (slug: string, id: number) =>
 export const getTags = () => api<{ tags: { tag: string; count: number }[] }>('/tags');
 export const getGraph = (includeSources = true) =>
   api<GraphData>(`/graph?include_sources=${includeSources}`);
+/** The graph around one document. The whole-wiki graph is unreadable at this size. */
+export const getNeighbourhood = (slug: string, hops = 1) =>
+  api<Neighbourhood>(`/graph/${encodeURIComponent(slug)}?hops=${hops}`);
+export const getRandomNote = (type?: string) =>
+  api<RandomNote>(`/random${type ? `?type=${encodeURIComponent(type)}` : ''}`);
 export const getOrphans = () =>
   api<{ unlinked: { slug: string; title: string }[]; wanted: { target: string; mentions: number }[] }>(
     '/orphans',

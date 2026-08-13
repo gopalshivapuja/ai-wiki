@@ -3,6 +3,30 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { docPath, getOrphans, getStats, getTags, listDocs, type DocSummary } from './api';
 import { useAsync } from './hooks';
 
+/** The maps of content, first, because they are the only curated way in. */
+function Hubs() {
+  const { data } = useAsync(() => listDocs({ type: 'moc', doc_class: 'note' }), []);
+  const mocs = data?.documents ?? [];
+  if (mocs.length === 0) return null;
+  return (
+    <section className="panel">
+      <h2>Maps of content</h2>
+      <p className="muted small">
+        Curated hubs. Each one organises a subject and links to the notes underneath it — the
+        place to start if you are not searching for something specific.
+      </p>
+      <div className="hub-grid">
+        {mocs.map((m) => (
+          <Link className="hub-card" key={m.slug} to={docPath(m.slug)}>
+            <span className="hub-title">{m.title}</span>
+            <span className="muted small">map of content</span>
+          </Link>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 export function BrowsePage() {
   const [params, setParams] = useSearchParams();
   const tag = params.get('tag');
@@ -99,6 +123,8 @@ export function BrowsePage() {
         </section>
       )}
 
+      {view !== 'loose' && !tag && !type && <Hubs />}
+
       {view !== 'loose' && (
         <>
           {(tag || type) && (
@@ -115,32 +141,6 @@ export function BrowsePage() {
                 </button>
               )}
             </p>
-          )}
-
-          {(tags.data?.tags.length ?? 0) > 0 && (
-            <section className="panel">
-              <h2>Tags</h2>
-              <div className="row gap wrap">
-                {tags.data?.tags.slice(0, 40).map((t) => (
-                  <button
-                    key={t.tag}
-                    className={`badge tag as-button${tag === t.tag ? ' active' : ''}`}
-                    onClick={() => setFilter('tag', tag === t.tag ? null : t.tag)}
-                  >
-                    #{t.tag} <span className="muted">{t.count}</span>
-                  </button>
-                ))}
-              </div>
-            </section>
-          )}
-
-          {docs.error && <p className="error">{docs.error}</p>}
-          {docs.loading && <p className="muted">Loading…</p>}
-          {!docs.loading && byType.length === 0 && (
-            <div className="empty-state">
-              <p>No notes match this filter.</p>
-              <Link to="/edit/new">Write one →</Link>
-            </div>
           )}
 
           {byType.map(([groupType, rows]) => (
@@ -171,6 +171,38 @@ export function BrowsePage() {
               </ul>
             </section>
           ))}
+
+          {(tags.data?.tags.length ?? 0) > 0 && (
+            <section className="panel">
+              <h2>Tags</h2>
+              <p className="muted small">
+                Labels attached as notes were written or distilled, not a designed taxonomy.
+                Useful for narrowing; <code>#unreviewed</code> marks what a model wrote and you
+                have not checked.
+              </p>
+              <div className="row gap wrap">
+                {tags.data?.tags.slice(0, 40).map((t) => (
+                  <button
+                    key={t.tag}
+                    className={`badge tag as-button${tag === t.tag ? ' active' : ''}`}
+                    onClick={() => setFilter('tag', tag === t.tag ? null : t.tag)}
+                  >
+                    #{t.tag} <span className="muted">{t.count}</span>
+                  </button>
+                ))}
+              </div>
+            </section>
+          )}
+
+          {docs.error && <p className="error">{docs.error}</p>}
+          {docs.loading && <p className="muted">Loading…</p>}
+          {!docs.loading && byType.length === 0 && (
+            <div className="empty-state">
+              <p>No notes match this filter.</p>
+              <Link to="/edit/new">Write one →</Link>
+            </div>
+          )}
+
         </>
       )}
     </div>

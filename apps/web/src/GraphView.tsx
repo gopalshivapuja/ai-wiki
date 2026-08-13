@@ -1,23 +1,8 @@
 import { useEffect, useMemo, useRef } from 'react';
 import { Network } from 'vis-network/standalone';
 import type { GraphData } from './api';
+import { TYPE_COLORS } from './graphColors';
 
-export const TYPE_COLORS: Record<string, string> = {
-  zettel: '#6ea8fe',
-  concept: '#3dd68c',
-  entity: '#f0ad4e',
-  literature: '#c77dff',
-  moc: '#ff6b6b',
-  synthesis: '#adb5bd',
-  index: '#ffd166',
-  page: '#9b9ba8',
-  web: '#7f8c9a',
-  pdf: '#7f8c9a',
-  youtube: '#7f8c9a',
-  audio: '#7f8c9a',
-  arxiv: '#7f8c9a',
-  note: '#7f8c9a',
-};
 
 interface Props {
   data: GraphData;

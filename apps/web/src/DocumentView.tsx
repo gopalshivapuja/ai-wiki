@@ -9,6 +9,7 @@ import {
   summarizeSource,
   type DocDetail,
 } from './api';
+import { Connections } from './Connections';
 import { useAsync } from './hooks';
 import { JobWatcher } from './JobsPanel';
 import { Markdown } from './Markdown';
@@ -99,6 +100,8 @@ export function DocumentView() {
         )}
 
         <Markdown content={doc.body} links={doc.links} selfSlug={doc.slug} />
+
+        <Connections slug={doc.slug} />
       </article>
 
       <aside className="sidebar">
@@ -165,8 +168,6 @@ export function DocumentView() {
               </>
             )}
             Updated {doc.updated_at ? new Date(doc.updated_at).toLocaleDateString() : 'unknown'}
-            <br />
-            <Link to={`/graph?focus=${encodeURIComponent(doc.slug)}`}>Show in graph →</Link>
           </p>
           {doc.revision_count > 0 && (
             <button className="ghost small" onClick={() => setShowRevisions((v) => !v)}>

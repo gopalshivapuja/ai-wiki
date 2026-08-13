@@ -181,8 +181,17 @@ input:focus, textarea:focus, select:focus {
   top: 0;
   z-index: 20;
 }
-.nav .logo { font-weight: 660; font-size: 1rem; color: var(--text); letter-spacing: -0.01em; }
+/* A typographic mark rather than an emoji: monospace, tight, with the separator carrying
+   the only colour. Reads as a tool, and stays crisp at any size in either theme. */
+.nav .logo {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-weight: 600;
+  font-size: 0.98rem;
+  color: var(--text);
+  letter-spacing: -0.03em;
+}
 .nav .logo:hover { text-decoration: none; }
+.nav .logo .logo-dot { color: var(--accent); font-weight: 700; padding: 0 0.02em; }
 .nav a { color: var(--muted); font-size: 0.88rem; }
 .nav a:hover, .nav a.active { color: var(--text); text-decoration: none; }
 .nav a.active { font-weight: 550; }
@@ -575,3 +584,66 @@ input:focus, textarea:focus, select:focus {
 }
 .login-card h1 { margin-bottom: 1.25rem; font-size: 1.35rem; }
 .login-card form { display: flex; flex-direction: column; gap: 0.75rem; }
+
+
+/* --- home page entry points ------------------------------------------------
+   A bare search box only helps once you know what to search for. These give a
+   400-note wiki a front door: curated hubs, and one note at random. */
+
+.section-label {
+  font-size: 0.74rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--muted);
+  margin: 0 0 0.6rem;
+}
+
+.start-here, .random-note { width: 100%; max-width: 640px; margin: 1.6rem auto 0; text-align: left; }
+
+.hub-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.6rem;
+}
+
+.hub-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.8rem 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--text);
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+.hub-card:hover {
+  border-color: var(--accent);
+  text-decoration: none;
+  transform: translateY(-1px);
+}
+.hub-title { font-weight: 600; line-height: 1.3; }
+
+.random-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.3rem;
+  padding: 0.8rem 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--text);
+}
+.random-card:hover { border-color: var(--accent); text-decoration: none; }
+.random-title { font-weight: 600; }
+
+/* --- connections panel -----------------------------------------------------
+   The local graph that replaced the whole-wiki view. Collapsed by default so
+   vis-network is never fetched for a reader who only wanted the note. */
+
+.connections { margin-top: 2rem; }
+.connections .graph-container { height: 340px; margin-top: 0.6rem; }
+.hop-toggle { display: inline-flex; gap: 0.15rem; }
+.hop-toggle .ghost.active { border-color: var(--accent); color: var(--accent); }
