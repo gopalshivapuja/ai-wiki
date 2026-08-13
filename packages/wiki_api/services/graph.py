@@ -52,6 +52,56 @@ def build_graph(db: Session, include_sources: bool = True) -> dict:
     return {"nodes": nodes, "edges": edges}
 
 
+MAX_NEIGHBOURHOOD = 60
+
+
+def build_neighbourhood(db: Session, slug: str, hops: int = 1) -> dict:
+    """The graph immediately around one document.
+
+    A whole-wiki graph is unreadable past a few dozen notes — 400 notes and 1,100 edges draw a
+    hairball that answers no question. The question a reader actually has is "what surrounds
+    this idea?", which is this.
+
+    Edges are followed in both directions: a note you link to and a note that links to you are
+    equally its neighbours.
+    """
+    full = build_graph(db, include_sources=True)
+    by_slug = {n["slug"]: n for n in full["nodes"]}
+    if slug not in by_slug:
+        return {"nodes": [], "edges": [], "center": slug, "hops": hops, "truncated": False}
+
+    adjacent: dict[str, set[str]] = {}
+    for e in full["edges"]:
+        adjacent.setdefault(e["source"], set()).add(e["target"])
+        adjacent.setdefault(e["target"], set()).add(e["source"])
+
+    keep = {slug}
+    frontier = {slug}
+    for _ in range(max(1, min(hops, 3))):
+        nxt: set[str] = set()
+        for node in frontier:
+            nxt |= adjacent.get(node, set()) - keep
+        if not nxt:
+            break
+        keep |= nxt
+        frontier = nxt
+
+    # A hub can pull in hundreds at two hops, which recreates the hairball at smaller scale.
+    # Keep the centre, then the best-connected, so what survives is the meaningful skeleton.
+    truncated = len(keep) > MAX_NEIGHBOURHOOD
+    if truncated:
+        ranked = sorted(keep - {slug}, key=lambda s: -by_slug[s]["link_count"])
+        keep = {slug, *ranked[: MAX_NEIGHBOURHOOD - 1]}
+
+    return {
+        "nodes": [by_slug[s] for s in keep],
+        "edges": [e for e in full["edges"] if e["source"] in keep and e["target"] in keep],
+        "center": slug,
+        "hops": hops,
+        "truncated": truncated,
+    }
+
+
 def orphans(db: Session) -> dict:
     """Notes nothing links to, and links pointing at notes that do not exist yet.
 

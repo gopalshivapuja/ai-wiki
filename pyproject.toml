@@ -30,6 +30,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Only needed to run the MCP server locally; the container that serves the wiki never
+# imports it, so it stays out of the image.
+mcp = [
+    "mcp>=2.0.0",
+]
 dev = [
     "pytest>=8.0.0",
     "httpx>=0.27.0",
@@ -38,7 +43,7 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["packages"]
-include = ["wiki_api*", "wiki_core*"]
+include = ["wiki_api*", "wiki_core*", "wiki_mcp*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -5,13 +5,15 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from wiki_core.llm import LLMNotConfigured
 
 from wiki_api.auth import get_current_user
 from wiki_api.database import (
+    NOTE,
     NOTE_SUBTYPES,
     ActivityLog,
     Document,
@@ -39,7 +41,7 @@ from wiki_api.services.content import (
 )
 from wiki_api.services.distill import UNREVIEWED
 from wiki_api.services.fetch import FetchError
-from wiki_api.services.graph import build_graph, orphans, stats
+from wiki_api.services.graph import build_graph, build_neighbourhood, orphans, stats
 from wiki_api.services.ingest import ai_query
 from wiki_api.services.search import search
 
@@ -175,7 +177,118 @@ def api_graph(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    """The whole graph. Kept for export and analysis; the UI draws neighbourhoods instead."""
     return build_graph(db, include_sources=include_sources)
+
+
+@router.get("/graph/{slug}")
+def api_neighbourhood(
+    slug: str,
+    hops: int = Query(1, ge=1, le=3),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """What surrounds one document — the question a whole-wiki graph cannot answer."""
+    if get_doc(db, slug) is None:
+        raise HTTPException(404, f"Nothing found at '{slug}'")
+    return build_neighbourhood(db, slug, hops=hops)
+
+
+@router.get("/random")
+def api_random(
+    type: str | None = Query(None),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """One random note, for rediscovery.
+
+    Notes only: a captured source is raw material, not something worth being handed at random.
+    Chosen in the database so a 400-note wiki does not ship every slug to the browser.
+    """
+    q = db.query(Document).filter(Document.doc_class == NOTE, Document.subtype != "index")
+    if type:
+        q = q.filter(Document.subtype == type)
+    doc = q.order_by(func.random()).first()
+    if doc is None:
+        raise HTTPException(404, "There are no notes yet")
+    body = doc.body or ""
+    # Skip the H1 and any frontmatter-ish preamble to find a sentence worth previewing.
+    preview = next(
+        (
+            line.strip()
+            for line in body.splitlines()
+            if line.strip() and not line.startswith(("#", "-", "*", ">", "|"))
+        ),
+        "",
+    )
+    return {**to_dict(doc, include_body=False), "preview": preview[:280]}
+
+
+@router.get("/llms.txt", response_class=PlainTextResponse)
+def api_llms_txt(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """A map of this wiki for a language model, in the llms.txt convention.
+
+    An agent arriving at a JSON API has no idea what the wiki holds or where to start. This
+    says what is here, names the maps of content as entry points, and gives the traversal
+    order that actually works: search, read, follow links.
+
+    Authenticated like everything else — the wiki is private, and describing its contents is
+    still describing its contents.
+    """
+    s = stats(db)
+    mocs = list_docs(db, doc_class=NOTE, subtype="moc", limit=50)
+    collections = sorted(
+        {r.collection for r in list_docs(db, doc_class="source", limit=2000) if r.collection}
+    )
+
+    lines = [
+        "# ai-wiki",
+        "",
+        "> A private single-user Zettelkasten. Every document is either a note (something "
+        "written or distilled) or a source (captured material: a web page, PDF, or video "
+        "transcript). Notes are joined by [[wikilinks]]; a link is only written once its "
+        "destination exists, so a resolved link always points at a real document.",
+        "",
+        f"{s['total_notes']} notes, {s['total_sources']} sources, {s['total_wikilinks']} links "
+        f"({s['avg_links_per_note']} per note).",
+        "",
+        "## Start here",
+        "",
+        "Maps of content are the entry points. Each one organises a subject and links to the "
+        "notes under it.",
+        "",
+    ]
+    lines += [f"- [{m.title}](/api/documents/{m.slug}): {m.slug}" for m in mocs] or ["- (none yet)"]
+    lines += [
+        "",
+        "## Note types",
+        "",
+        f"- zettel ({s['zettels']}): one atomic idea, the unit worth citing",
+        f"- literature ({s['literature']}): what one source said, linked to that source",
+        f"- concept ({s['concepts']}), entity ({s['entities']}): longer-lived reference notes",
+        f"- moc ({s['mocs']}): a map of content",
+        "",
+        "Notes tagged `unreviewed` were written by a model and not yet checked by a human. "
+        "Weigh them accordingly.",
+        "",
+    ]
+    if collections:
+        lines += ["## Source collections", "", *[f"- {c}" for c in collections], ""]
+    lines += [
+        "## How to traverse",
+        "",
+        "1. `GET /api/search?q=...` — full-text search over notes and sources.",
+        "2. `GET /api/documents/{slug}` — the markdown body, plus `links` (outgoing, each "
+        "flagged with whether it resolves) and `backlinks` (what points here).",
+        "3. `GET /api/graph/{slug}?hops=1` — the neighbourhood around a document.",
+        "4. `GET /api/documents?type=moc` — list the maps of content.",
+        "5. `POST /api/llm/query` — ask a question and get an answer with citations.",
+        "",
+        "Every route needs `Authorization: Bearer <token>`. Prefer reading a map of content "
+        "before searching: it gives the vocabulary this wiki actually uses.",
+        "",
+    ]
+    return "\n".join(lines)
 
 
 @router.get("/orphans")

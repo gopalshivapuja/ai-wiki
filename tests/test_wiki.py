@@ -815,3 +815,79 @@ def test_export_is_readable_past_the_drain_boundary(client, auth):
         with session_scope() as db:
             for slug in made:
                 delete_doc(db, slug)
+
+
+def test_neighbourhood_stays_within_the_requested_hops(client, auth):
+    """A whole-wiki graph is unreadable; the local one must actually be local."""
+    from wiki_api.database import session_scope
+    from wiki_api.services.content import create_note, delete_doc
+    from wiki_api.services.graph import build_neighbourhood
+
+    made = []
+    with session_scope() as db:
+        # A chain: centre -> near -> far -> distant
+        for name, body in [
+            ("Hop Distant", "leaf"),
+            ("Hop Far", "[[hop-distant]]"),
+            ("Hop Near", "[[hop-far]]"),
+            ("Hop Centre", "[[hop-near]]"),
+        ]:
+            made.append(create_note(db, name, body, subtype="zettel").slug)
+
+        one = build_neighbourhood(db, "hop-centre", hops=1)
+        two = build_neighbourhood(db, "hop-centre", hops=2)
+
+    try:
+        at_one = {n["slug"] for n in one["nodes"]}
+        at_two = {n["slug"] for n in two["nodes"]}
+        assert at_one == {"hop-centre", "hop-near"}
+        assert at_two == {"hop-centre", "hop-near", "hop-far"}
+        assert "hop-distant" not in at_two
+        # Every edge returned must join two nodes that were returned.
+        for e in two["edges"]:
+            assert e["source"] in at_two and e["target"] in at_two
+    finally:
+        with session_scope() as db:
+            for slug in made:
+                delete_doc(db, slug)
+
+
+def test_neighbourhood_follows_links_in_both_directions(client, auth):
+    """A note that links to you is as much a neighbour as one you link to."""
+    from wiki_api.database import session_scope
+    from wiki_api.services.content import create_note, delete_doc
+    from wiki_api.services.graph import build_neighbourhood
+
+    with session_scope() as db:
+        create_note(db, "Backlink Centre", "no links out", subtype="zettel")
+        create_note(db, "Backlink Pointer", "[[backlink-centre]]", subtype="zettel")
+        n = build_neighbourhood(db, "backlink-centre", hops=1)
+
+    try:
+        assert "backlink-pointer" in {x["slug"] for x in n["nodes"]}
+    finally:
+        with session_scope() as db:
+            delete_doc(db, "backlink-centre")
+            delete_doc(db, "backlink-pointer")
+
+
+def test_random_returns_a_note_never_a_source(client, auth):
+    for _ in range(8):
+        r = client.get("/api/random", headers=auth)
+        assert r.status_code == 200
+        body = r.json()
+        assert body["doc_class"] == "note"
+        assert body["type"] != "index", "the index is not a note to rediscover"
+        assert "preview" in body
+
+
+def test_llms_txt_describes_the_wiki_and_needs_auth(client, auth):
+    assert client.get("/api/llms.txt").status_code == 401
+
+    text = client.get("/api/llms.txt", headers=auth).text
+    assert text.startswith("# ai-wiki")
+    assert "## Start here" in text and "## How to traverse" in text
+    # Every map of content must be named, since those are the entry points it promises.
+    mocs = client.get("/api/documents?doc_class=note&type=moc", headers=auth).json()["documents"]
+    for m in mocs:
+        assert m["slug"] in text, f"{m['slug']} missing from llms.txt"
