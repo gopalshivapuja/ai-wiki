@@ -647,3 +647,16 @@ input:focus, textarea:focus, select:focus {
 .connections .graph-container { height: 340px; margin-top: 0.6rem; }
 .hop-toggle { display: inline-flex; gap: 0.15rem; }
 .hop-toggle .ghost.active { border-color: var(--accent); color: var(--accent); }
+
+
+/* The read-only demo says so plainly, rather than quietly failing when a form is submitted. */
+.demo-banner {
+  border: 1px solid var(--accent);
+  background: var(--accent-soft);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 0.7rem 0.9rem;
+  margin: 0.8rem 0 0;
+  font-size: 0.9rem;
+  line-height: 1.5;
+}

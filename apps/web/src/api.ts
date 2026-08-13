@@ -205,7 +205,17 @@ export const login = async (email: string, password: string) => {
 };
 
 export const logout = () => localStorage.removeItem(TOKEN_KEY);
-export const me = () => api<{ email: string }>('/auth/me');
+export interface UserInfo {
+  email: string;
+  role: string;
+  /** Spelled out by the server so the UI never has to know the role vocabulary. */
+  can_edit: boolean;
+}
+export const me = () => api<UserInfo>('/auth/me');
+export const getRelated = (slug: string, k = 8) =>
+  api<{ related: { slug: string; title: string; type: string; score: number }[] }>(
+    `/related/${encodeURIComponent(slug)}?k=${k}`,
+  );
 
 // --- documents ---------------------------------------------------------------
 

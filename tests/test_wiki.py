@@ -911,8 +911,15 @@ def reader_auth(client):
 
 
 def test_reader_can_read_everything(client, reader_auth):
-    for path in ("/api/stats", "/api/documents", "/api/search?q=note", "/api/orphans",
-                 "/api/llms.txt", "/api/random", "/api/jobs"):
+    for path in (
+        "/api/stats",
+        "/api/documents",
+        "/api/search?q=note",
+        "/api/orphans",
+        "/api/llms.txt",
+        "/api/random",
+        "/api/jobs",
+    ):
         assert client.get(path, headers=reader_auth).status_code == 200, path
 
 
@@ -963,8 +970,8 @@ def test_embeddings_round_trip_through_bytes():
 
 def test_everything_still_works_without_an_embedding_model(client, auth, monkeypatch):
     """Absence of the model is a supported configuration, not a failure."""
-    from wiki_api.services import embed
     from wiki_api.database import session_scope
+    from wiki_api.services import embed
     from wiki_api.services.relate import embed_missing, similar
 
     monkeypatch.setattr(embed, "_get_model", lambda: None)
@@ -1026,11 +1033,20 @@ def test_a_relation_without_a_reason_is_discarded():
     from wiki_api.services.distill import _concepts_from
 
     got = _concepts_from(
-        {"concepts": [{"name": "Thing", "summary": "s", "why": "w", "relates_to": [
-            {"name": "Other", "reason": "because it extends it"},
-            {"name": "Unjustified"},
-            {"reason": "orphan reason"},
-        ]}]},
+        {
+            "concepts": [
+                {
+                    "name": "Thing",
+                    "summary": "s",
+                    "why": "w",
+                    "relates_to": [
+                        {"name": "Other", "reason": "because it extends it"},
+                        {"name": "Unjustified"},
+                        {"reason": "orphan reason"},
+                    ],
+                }
+            ]
+        },
         limit=8,
     )
     assert [r.name for r in got[0].relates_to] == ["Other"]
@@ -1048,8 +1064,9 @@ def test_sweep_clears_finished_payloads_but_spares_live_jobs():
 
     ids = {}
     with session_scope() as db:
-        old_done = Job(kind="pdf", status="done", payload="x" * 5000,
-                       finished_at=utcnow() - timedelta(days=3))
+        old_done = Job(
+            kind="pdf", status="done", payload="x" * 5000, finished_at=utcnow() - timedelta(days=3)
+        )
         recent_done = Job(kind="pdf", status="done", payload="y" * 100, finished_at=utcnow())
         queued = Job(kind="pdf", status="queued", payload="z" * 100)
         db.add_all([old_done, recent_done, queued])

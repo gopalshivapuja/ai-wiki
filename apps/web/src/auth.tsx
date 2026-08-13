@@ -6,6 +6,9 @@ interface AuthState {
   email: string | null;
   loading: boolean;
   isAuthed: boolean;
+  /** False for the read-only demo account. The server enforces this too — hiding a button
+   *  is a courtesy, not a control. */
+  canEdit: boolean;
   signedIn: (email: string) => void;
   logout: () => void;
 }
@@ -14,12 +17,14 @@ const AuthContext = createContext<AuthState>({
   email: null,
   loading: true,
   isAuthed: false,
+  canEdit: true,
   signedIn: () => {},
   logout: () => {},
 });
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [email, setEmail] = useState<string | null>(null);
+  const [canEdit, setCanEdit] = useState(true);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -33,7 +38,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     // Verified against the server rather than trusting that a token exists: it may have
     // expired, in which case the nav would otherwise still show "Log out".
     me()
-      .then((u) => !ignore && setEmail(u.email))
+      .then((u) => {
+        if (ignore) return;
+        setEmail(u.email);
+        setCanEdit(u.can_edit);
+      })
       .catch(() => !ignore && setEmail(null))
       .finally(() => !ignore && setLoading(false));
     return () => {
@@ -47,18 +56,25 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       email,
       loading,
       isAuthed: Boolean(email),
+      canEdit,
       // Set directly from the login response. Re-fetching /me here raced the redirect and
       // bounced the user straight back to the login form.
+      // Ask the server what this account may do; assuming write access would flash edit
+      // controls at a demo user before /me came back and corrected it.
       signedIn: (e: string) => {
         setEmail(e);
         setLoading(false);
+        me()
+          .then((u) => setCanEdit(u.can_edit))
+          .catch(() => setCanEdit(false));
       },
       logout: () => {
         apiLogout();
         setEmail(null);
+        setCanEdit(true);
       },
     }),
-    [email, loading],
+    [email, loading, canEdit],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

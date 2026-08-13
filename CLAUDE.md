@@ -43,10 +43,30 @@ is why it was removed.
 `GraphView` must stay lazily imported (see `Connections.tsx`): vis-network is ~600KB, and a
 static import put it in the document bundle for every reader who only wanted to read.
 
+### Semantic linking
+
+`services/embed.py` gives every document a 384-dimension vector (bge-small via ONNX, baked
+into the image); `services/relate.py` does brute-force cosine over them. **No pgvector** — at
+this size an extension and a migration buy nothing measurable.
+
+The two linking mechanisms are complementary and both are needed. Embeddings capture
+*similarity*: "Forward Diffusion Process" and "Forward Process in Diffusion Models" score
+0.886 and converge to one note, while "Positional Encoding" and "Rotary Positional Encoding"
+score 0.828 and stay separate. The extraction prompt's `relates_to` captures *relationship*,
+which embeddings miss entirely — vanishing gradient and ReLU are only 0.548 similar despite
+one existing to fix the other.
+
+Everything degrades to lexical matching when the model is absent, so tests need nothing
+installed. Keep it that way.
+
+The reason this exists: only 1.7% of edges once joined one idea to another, because
+distillation linked a note to its source and stopped. If you change `distill.py`, keep
+`_write_cross_links` and the `## Related` section — they are the fix.
+
 ### LLM access
 
 `GET /api/llms.txt` is the machine-readable map, and `packages/wiki_mcp` is a read-only MCP
-server over the same HTTP API. Both stay behind the normal auth — the wiki is private, and
+server over the same HTTP API — documented in `docs/MCP.md`. Both stay behind the normal auth — the wiki is private, and
 describing its contents is still describing its contents. Keep `wiki_mcp` out of the runtime
 dependencies; it is an optional `[mcp]` extra so the container never imports it.
 
@@ -138,6 +158,11 @@ input directly.
 **The wiki is private.** Every route requires a token. There is no public/private split by document
 class — literature notes reproduce the substance of the sources they summarise, so that split
 protected nothing.
+
+Roles are `admin` and `reader`. A reader may read everything and write nothing; `require_admin`
+in `auth.py` guards every mutating route, because the demo account's password is public by
+design and hiding buttons is not a control. `_ensure_demo()` re-asserts the reader role on
+every boot for the same reason.
 
 Auth is one admin from the environment. `_ensure_admin()` re-syncs the password from
 `ADMIN_PASSWORD` on every boot, which is why there is no signup and no in-app password change — they

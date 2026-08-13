@@ -77,11 +77,11 @@ queue, OpenRouter for text and OpenAI Whisper or Deepgram for transcription.
 Architecture and conventions are in [CLAUDE.md](./CLAUDE.md). The API documents itself at
 `/docs` while the app is running.
 
-## Using the wiki from Claude Code
+## Using the wiki from Claude
 
-`packages/wiki_mcp` is an MCP server that lets a model search, read and follow links in the
-wiki. It runs on your machine and talks to the deployed app over HTTP, so there is no second
-copy of the data and nothing about the deployment changes.
+`packages/wiki_mcp` is a read-only MCP server that lets Claude Code or Claude Desktop search
+the wiki, read notes and follow links. It runs on your machine and talks to the deployed app,
+so there is no second copy of your data.
 
 ```bash
 pip install -e '.[mcp]'
@@ -92,16 +92,6 @@ claude mcp add ai-wiki \
   -- python -m wiki_mcp.server
 ```
 
-Get a token from `POST /api/auth/login`. The tools are:
+**[Full setup, the six tools, worked examples and troubleshooting → `docs/MCP.md`](docs/MCP.md)**
 
-| Tool | What it does |
-|---|---|
-| `wiki_overview` | The llms.txt map — call first if you do not know what the wiki holds |
-| `search_wiki` | Full-text search, returning slugs, titles and snippets |
-| `read_note` | One document's markdown, plus its links and backlinks |
-| `list_maps` | The maps of content, the curated entry points |
-| `related_notes` | The neighbourhood around a document, 1–3 hops |
-| `ask_wiki` | An answer synthesised from the wiki, with citations |
-
-The server is **read-only**. Letting an agent rewrite notes unsupervised is a much larger
-decision than letting it read them, and it is not one this makes for you.
+For non-MCP consumers, `GET /api/llms.txt` describes the wiki in the llms.txt convention.

@@ -4,11 +4,13 @@ import {
   deleteDoc,
   docPath,
   getDoc,
+  getRelated,
   getRevisions,
   restoreRevision,
   summarizeSource,
   type DocDetail,
 } from './api';
+import { useAuth } from './auth';
 import { Connections } from './Connections';
 import { useAsync } from './hooks';
 import { JobWatcher } from './JobsPanel';
@@ -17,6 +19,7 @@ import { Toc } from './Toc';
 
 export function DocumentView() {
   const { slug = '' } = useParams<{ slug: string }>();
+  const { canEdit } = useAuth();
   const navigate = useNavigate();
   const { data: doc, error, loading, reload } = useAsync<DocDetail>(() => getDoc(slug), [slug]);
   const [jobId, setJobId] = useState<number | null>(null);
@@ -69,12 +72,12 @@ export function DocumentView() {
             ))}
           </div>
           <div className="row gap">
-            {!isSource && (
+            {!isSource && canEdit && (
               <Link className="button-link" to={`/edit/${encodeURIComponent(doc.slug)}`}>
                 Edit
               </Link>
             )}
-            {isSource && !doc.summary && (
+            {isSource && !doc.summary && canEdit && (
               <button onClick={async () => setJobId((await summarizeSource(slug)).id)} disabled={jobId !== null}>
                 Summarize with AI
               </button>
@@ -156,6 +159,8 @@ export function DocumentView() {
           </section>
         )}
 
+        <RelatedByMeaning slug={doc.slug} />
+
         <section>
           <h3>Details</h3>
           <p className="muted small">
@@ -177,14 +182,41 @@ export function DocumentView() {
           {showRevisions && <RevisionList slug={slug} onRestore={reload} />}
         </section>
 
-        <section>
-          <h3>Danger zone</h3>
-          <button className="ghost danger small" onClick={remove}>
-            Delete
-          </button>
-        </section>
+        {canEdit && (
+          <section>
+            <h3>Danger zone</h3>
+            <button className="ghost danger small" onClick={remove}>
+              Delete
+            </button>
+          </section>
+        )}
       </aside>
     </div>
+  );
+}
+
+/** Notes about the same thing, whether or not anyone linked them.
+ *
+ * The explicit links above are what someone decided to write. This is what the wiki turns out
+ * to contain — computed from meaning, so it surfaces the connection nobody thought to make. */
+function RelatedByMeaning({ slug }: { slug: string }) {
+  const { data } = useAsync(() => getRelated(slug, 6), [slug]);
+  const related = data?.related ?? [];
+  // Silent when there are no embeddings yet, rather than explaining an absence nobody asked
+  // about — the wiki works fine without them.
+  if (related.length === 0) return null;
+
+  return (
+    <section>
+      <h3>Related by meaning ({related.length})</h3>
+      <ul>
+        {related.map((r) => (
+          <li key={r.slug}>
+            <Link to={docPath(r.slug)}>{r.title}</Link>
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }
 

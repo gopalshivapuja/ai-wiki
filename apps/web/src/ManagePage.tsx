@@ -1,4 +1,5 @@
 import { useRef, useState } from 'react';
+import { useAuth } from './auth';
 import { Link, useSearchParams } from 'react-router-dom';
 import {
   crawlSite,
@@ -32,6 +33,7 @@ const TABS: { id: Tab; label: string; hint: string }[] = [
 ];
 
 export function ManagePage() {
+  const { canEdit } = useAuth();
   const [params, setParams] = useSearchParams();
   const collection = params.get('collection');
   const [tab, setTab] = useState<Tab>('web');
@@ -67,6 +69,14 @@ export function ManagePage() {
       <p className="muted">
         Everything you add is captured unchanged, then summarised into a linked note you can edit.
       </p>
+
+      {!canEdit && (
+        <p className="demo-banner">
+          <strong>Read-only demo.</strong> Every form here works exactly as it does for the
+          owner, so you can see what adding a source involves — but nothing is saved, and the
+          wiki is left untouched.
+        </p>
+      )}
 
       <div className="tabs" role="tablist">
         {TABS.map((t) => (
