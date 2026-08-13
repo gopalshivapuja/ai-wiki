@@ -155,9 +155,10 @@ test.describe('ask ai', () => {
     const res = await request.get(`${BASE}/api/llm/models`, {
       headers: { Authorization: `Bearer ${await tokenFor(request)}` },
     });
-    // The route answers 200 without a key; what matters is whether it settled on a model.
+    // api_key_set, not will_use: the route answers 200 with no key and still names a model
+    // it *would* use, so will_use is truthy on a deployment that cannot answer at all.
     const status = res.ok() ? await res.json() : null;
-    test.skip(!status?.will_use, 'no LLM configured, so there is no answer to stream');
+    test.skip(!status?.api_key_set, 'no OPENROUTER_API_KEY, so there is no answer to stream');
     test.setTimeout(180_000);
     await page.goto(`${BASE}/ask`);
     await page.getByLabel('Your question').fill('What is attention?');
