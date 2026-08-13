@@ -1082,3 +1082,61 @@ def test_sweep_clears_finished_payloads_but_spares_live_jobs():
         assert db.get(Job, ids["queued"]).payload is not None, "never touch unfinished work"
         for job_id in ids.values():
             db.delete(db.get(Job, job_id))
+
+
+def test_schema_ddl_restores_columns_create_all_would_not(client):
+    """create_all() creates missing tables, not missing columns.
+
+    Adding `embedding` and `role` to the models and deploying failed the healthcheck in
+    production: the tables already existed, so create_all() did nothing, and every query
+    named a column the database did not have. This drops those columns and asserts the boot
+    DDL puts them back — the upgrade path a real deploy takes, which a locally-created schema
+    never exercises.
+    """
+    from sqlalchemy import inspect, text
+
+    from wiki_api.database import engine
+    from wiki_api.schema_ddl import apply_schema_ddl
+
+    added = {"documents": ["embedding", "embedding_model", "embedded_at"], "users": ["role"]}
+    with engine.begin() as conn:
+        for table, columns in added.items():
+            for column in columns:
+                conn.execute(text(f"ALTER TABLE {table} DROP COLUMN IF EXISTS {column}"))
+
+    inspector = inspect(engine)
+    assert "embedding" not in {c["name"] for c in inspector.get_columns("documents")}
+
+    apply_schema_ddl()
+
+    inspector = inspect(engine)
+    for table, columns in added.items():
+        present = {c["name"] for c in inspector.get_columns(table)}
+        for column in columns:
+            assert column in present, f"{table}.{column} was not restored by schema_ddl"
+
+    # Idempotent: a second boot must not fail.
+    apply_schema_ddl()
+
+
+def test_every_model_column_is_creatable_on_an_existing_table():
+    """Guards the whole class of bug rather than the two columns that caused it.
+
+    Any column added to a model from now on must also appear in PG_STATEMENTS, or the next
+    deploy repeats the outage.
+    """
+    from wiki_api.database import Document, User
+    from wiki_api.schema_ddl import PG_STATEMENTS
+
+    ddl = " ".join(PG_STATEMENTS).lower()
+    # Columns present in the original schema predate this rule; these are the ones added since.
+    added_since = {
+        "documents": {"embedding", "embedding_model", "embedded_at"},
+        "users": {"role"},
+    }
+    for model, table in ((Document, "documents"), (User, "users")):
+        for column in model.__table__.columns:
+            if column.name in added_since[table]:
+                assert f"add column if not exists {column.name}" in ddl, (
+                    f"{table}.{column.name} is in the model but has no ADD COLUMN statement"
+                )

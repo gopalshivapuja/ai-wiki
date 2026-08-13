@@ -104,8 +104,12 @@ database is not something to ship.
 
 ### Schema changes
 
-**No Alembic.** New tables come from `create_all()`; anything SQLAlchemy cannot express goes in
-`schema_ddl.py::PG_STATEMENTS`, which must stay additive and idempotent. It currently holds the
+**No Alembic.** New tables come from `create_all()` — but **new columns on existing tables are
+not**. `create_all()` only creates tables that are missing entirely, so adding an attribute to
+a model and deploying it ships an app whose queries name a column the database lacks; that is
+how the embedding columns failed a healthcheck in production. Every new column goes in
+`schema_ddl.py::PG_STATEMENTS` as `ADD COLUMN IF NOT EXISTS`, which must stay additive and
+idempotent. It currently holds the
 generated `search_tsv` column and the GIN indexes. Failures there are fatal by design — a boot that
 warns and then serves broken search is worse than one that stops.
 

@@ -1,7 +1,13 @@
 """Idempotent, additive-only DDL applied at every boot.
 
-There is no migration tool by design. New *tables* come from `Base.metadata.create_all()`;
-things SQLAlchemy cannot express — chiefly the generated `tsvector` column — live here.
+There is no migration tool by design. New *tables* come from `Base.metadata.create_all()`.
+Everything else lives here, and note what "everything else" includes:
+
+**A new column on an existing table is NOT created by create_all().** It only creates tables
+that are missing entirely. Adding an attribute to a model and deploying it therefore ships an
+app whose every query names a column the database does not have — which is exactly how the
+embedding columns took production down until they were added below. Any new column belongs
+in PG_STATEMENTS as `ADD COLUMN IF NOT EXISTS`.
 
 Rules for anything added below:
 
@@ -46,6 +52,16 @@ PG_STATEMENTS: list[str] = [
     # Tag filtering and the tag cloud, without scanning every body.
     "CREATE INDEX IF NOT EXISTS ix_documents_tags ON documents USING GIN (tags jsonb_path_ops)",
     "CREATE INDEX IF NOT EXISTS ix_jobs_status_created ON jobs (status, created_at)",
+    # Columns added to tables that already exist. create_all() creates missing *tables* and
+    # nothing else, so a new attribute on an existing model is invisible to it — the first
+    # deploy of the embedding columns failed its healthcheck because every SELECT named a
+    # column the database did not have. Any new column on documents/users/jobs belongs here.
+    "ALTER TABLE documents ADD COLUMN IF NOT EXISTS embedding bytea",
+    "ALTER TABLE documents ADD COLUMN IF NOT EXISTS embedding_model varchar",
+    "ALTER TABLE documents ADD COLUMN IF NOT EXISTS embedded_at timestamptz",
+    # Defaulting to admin keeps the existing owner's access when this column appears; the
+    # demo account is set to reader explicitly on every boot.
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS role varchar NOT NULL DEFAULT 'admin'",
 ]
 
 
