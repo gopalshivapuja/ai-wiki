@@ -20,7 +20,6 @@ RUN apt-get update \
 # ships a wheel with no description.
 COPY pyproject.toml README.md ./
 COPY packages/ packages/
-COPY seed/ seed/
 
 RUN pip install --no-cache-dir .
 
@@ -33,7 +32,8 @@ RUN python -c "from fastembed import TextEmbedding; TextEmbedding(model_name='BA
 COPY --from=web /web/dist /app/static
 
 ENV STATIC_DIR=/app/static
-# Without this the seeder resolves relative to site-packages and imports nothing.
+# No starter content ships. A fresh database begins empty and is restored from an export;
+# seed_if_empty() logs and continues when this path holds nothing.
 ENV WIKI_SEED_DIR=/app
 ENV PYTHONUNBUFFERED=1
 ENV PORT=8000
