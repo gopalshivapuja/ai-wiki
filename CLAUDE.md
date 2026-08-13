@@ -31,6 +31,25 @@ design, all load-bearing:
 - **`immutable`** marks captured material. `update_note()` raises `Immutable` → HTTP 409.
 - Sources appear in search, the graph, backlinks and red-link detection exactly like notes.
 
+### The graph is local, not global
+
+`build_neighbourhood()` in `services/graph.py` returns the documents within N hops of one
+slug, following links in both directions, capped at `MAX_NEIGHBOURHOOD` and ranked by
+connectedness so a hub cannot recreate a hairball. The UI draws only this, on the note
+itself; `GET /api/graph` still returns the whole graph for export and analysis. Do not
+reintroduce a whole-wiki graph page — at 400 notes and 1,100 edges it was unreadable, which
+is why it was removed.
+
+`GraphView` must stay lazily imported (see `Connections.tsx`): vis-network is ~600KB, and a
+static import put it in the document bundle for every reader who only wanted to read.
+
+### LLM access
+
+`GET /api/llms.txt` is the machine-readable map, and `packages/wiki_mcp` is a read-only MCP
+server over the same HTTP API. Both stay behind the normal auth — the wiki is private, and
+describing its contents is still describing its contents. Keep `wiki_mcp` out of the runtime
+dependencies; it is an optional `[mcp]` extra so the container never imports it.
+
 `Revision` snapshots a document before every content change (`_snapshot()` in `content.py`). Nothing
 else protects against a bad edit or an AI rewrite.
 
