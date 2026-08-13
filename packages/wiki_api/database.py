@@ -15,6 +15,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Integer,
+    LargeBinary,
     String,
     Text,
     create_engine,
@@ -73,12 +74,20 @@ NOTE_SUBTYPES = (
 SOURCE_SUBTYPES = ("web", "pdf", "youtube", "audio", "arxiv", "note")
 
 
+ADMIN = "admin"
+READER = "reader"
+
+
 class User(Base):
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True)
     email = Column(String, unique=True, index=True, nullable=False)
     hashed_password = Column(String, nullable=False)
+    # "admin" writes; "reader" only reads. Defaulting to admin means the existing row keeps
+    # its access when this column appears, which matters because create_all() adds it in
+    # place with no migration.
+    role = Column(String, nullable=False, default=ADMIN, server_default=ADMIN)
     created_at = Column(DateTime(timezone=True), default=utcnow)
 
 
@@ -117,6 +126,13 @@ class Document(Base):
 
     # Captured material is not editable. The invariant survives the table merge as a column.
     immutable = Column(Boolean, nullable=False, default=False)
+
+    # Position in meaning-space, so "related" can be computed instead of only hand-written.
+    # Raw float32 rather than JSON: 1.5KB against roughly 9KB, and it is never queried in SQL —
+    # similarity is computed in Python, which at this size is faster than a round trip.
+    embedding = Column(LargeBinary, nullable=True)
+    embedding_model = Column(String, nullable=True)
+    embedded_at = Column(DateTime(timezone=True), nullable=True)
 
     created_at = Column(DateTime(timezone=True), default=utcnow)
     updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
@@ -204,6 +220,7 @@ def session_scope() -> Iterator[Session]:
 def init_db() -> None:
     Base.metadata.create_all(bind=engine)
     _ensure_admin()
+    _ensure_demo()
 
 
 def _ensure_admin() -> None:
@@ -224,12 +241,49 @@ def _ensure_admin() -> None:
     try:
         user = db.query(User).filter(User.email == email).first()
         if user is None:
-            db.add(User(email=email, hashed_password=hash_password(password)))
+            db.add(User(email=email, hashed_password=hash_password(password), role=ADMIN))
             db.commit()
             logger.info("Created admin user %s", email)
-        elif not verify_password(password, user.hashed_password):
-            user.hashed_password = hash_password(password)
+        else:
+            if not verify_password(password, user.hashed_password):
+                user.hashed_password = hash_password(password)
+                logger.info("Updated admin password for %s from ADMIN_PASSWORD", email)
+            # Re-asserted every boot: the admin must never be left as a reader by a bad edit.
+            user.role = ADMIN
             db.commit()
-            logger.info("Updated admin password for %s from ADMIN_PASSWORD", email)
+    finally:
+        db.close()
+
+
+def _ensure_demo() -> None:
+    """Create or re-sync the read-only demo account, if one is configured.
+
+    A reader can see everything and change nothing (see require_admin in routes). The point is
+    to be able to show the wiki — including what Add source looks like — without handing over
+    the ability to write to it.
+
+    Absent DEMO_EMAIL, no such account exists; this is opt-in.
+    """
+    from wiki_api.auth_utils import hash_password, verify_password
+
+    email = (os.environ.get("DEMO_EMAIL") or "").strip().lower()
+    password = os.environ.get("DEMO_PASSWORD") or ""
+    if not email or not password:
+        return
+
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.email == email).first()
+        if user is None:
+            db.add(User(email=email, hashed_password=hash_password(password), role=READER))
+            db.commit()
+            logger.info("Created read-only demo user %s", email)
+        else:
+            if not verify_password(password, user.hashed_password):
+                user.hashed_password = hash_password(password)
+            # Forced every boot: a demo account that drifted to admin would be a quiet
+            # privilege escalation on a login whose password is public by design.
+            user.role = READER
+            db.commit()
     finally:
         db.close()

@@ -891,3 +891,177 @@ def test_llms_txt_describes_the_wiki_and_needs_auth(client, auth):
     mocs = client.get("/api/documents?doc_class=note&type=moc", headers=auth).json()["documents"]
     for m in mocs:
         assert m["slug"] in text, f"{m['slug']} missing from llms.txt"
+
+
+# --- read-only demo account ---------------------------------------------------
+
+
+@pytest.fixture
+def reader_auth(client):
+    """A reader token. The role is what the API enforces on, not the UI."""
+    from wiki_api.auth_utils import hash_password
+    from wiki_api.database import READER, User, session_scope
+
+    email, password = "demo-test@example.com", "demo-pass-123"
+    with session_scope() as db:
+        if not db.query(User).filter(User.email == email).first():
+            db.add(User(email=email, hashed_password=hash_password(password), role=READER))
+    token = client.post("/api/auth/login", json={"email": email, "password": password}).json()
+    return {"Authorization": f"Bearer {token['access_token']}"}
+
+
+def test_reader_can_read_everything(client, reader_auth):
+    for path in ("/api/stats", "/api/documents", "/api/search?q=note", "/api/orphans",
+                 "/api/llms.txt", "/api/random", "/api/jobs"):
+        assert client.get(path, headers=reader_auth).status_code == 200, path
+
+
+def test_reader_is_refused_every_write(client, reader_auth, auth):
+    """The demo password is public by design, so the server has to be what says no."""
+    writes = [
+        ("post", "/api/documents", {"json": {"title": "Sneaky", "body": "x"}}),
+        ("put", "/api/documents/index", {"json": {"body": "defaced"}}),
+        ("delete", "/api/documents/index", {}),
+        ("post", "/api/review/approve", {"json": {}}),
+        ("post", "/api/jobs/web", {"json": {"url": "https://example.com"}}),
+        ("post", "/api/jobs/paste", {"json": {"title": "t", "text": "x"}}),
+        ("post", "/api/jobs/summarize", {"json": {"source_slug": "x"}}),
+        ("post", "/api/maintenance/embed", {}),
+    ]
+    for method, path, kwargs in writes:
+        res = getattr(client, method)(path, headers=reader_auth, **kwargs)
+        assert res.status_code == 403, f"{method.upper()} {path} returned {res.status_code}"
+        assert "read-only" in res.json()["detail"].lower()
+
+    # And nothing leaked through: the index is untouched.
+    assert "defaced" not in client.get("/api/documents/index", headers=auth).json()["body"]
+
+
+def test_admin_role_survives_the_new_column(client, auth):
+    me = client.get("/api/auth/me", headers=auth).json()
+    assert me["role"] == "admin" and me["can_edit"] is True
+
+
+# --- semantic association -----------------------------------------------------
+
+
+def test_similarity_ranks_the_same_idea_above_a_different_one():
+    from wiki_api.services.relate import cosine
+
+    a, b, c = [1.0, 0.0, 0.0], [0.9, 0.1, 0.0], [0.0, 1.0, 0.0]
+    assert cosine(a, b) > cosine(a, c)
+    assert cosine(a, a) == pytest.approx(1.0)
+
+
+def test_embeddings_round_trip_through_bytes():
+    from wiki_api.services.embed import from_bytes, to_bytes
+
+    vec = [0.5, -0.25, 0.125]
+    assert from_bytes(to_bytes(vec)) == pytest.approx(vec)
+    assert from_bytes(None) is None
+
+
+def test_everything_still_works_without_an_embedding_model(client, auth, monkeypatch):
+    """Absence of the model is a supported configuration, not a failure."""
+    from wiki_api.services import embed
+    from wiki_api.database import session_scope
+    from wiki_api.services.relate import embed_missing, similar
+
+    monkeypatch.setattr(embed, "_get_model", lambda: None)
+    monkeypatch.setattr(embed, "_load_failed", True)
+    assert embed.embed_one("anything") is None
+    assert embed.embed_document("t", "b") is None
+    with session_scope() as db:
+        assert embed_missing(db)["embedded"] == 0
+        assert similar(db, "index") == []
+    assert client.get("/api/related/index", headers=auth).status_code == 200
+
+
+def test_distillation_links_ideas_to_each_other(client, auth, monkeypatch):
+    """The defect this pipeline was rebuilt for: 1.7% of edges joined one idea to another.
+
+    Concepts extracted together must end up linked to each other, in both directions.
+    """
+    from wiki_api.database import session_scope
+    from wiki_api.services import distill as D
+    from wiki_api.services.content import delete_doc, get_doc, store_source
+
+    concepts = [
+        D.Concept(
+            name="Alpha Mechanism",
+            summary="Alpha does a thing.",
+            why="it underpins beta",
+            relates_to=[D.Relation(name="Beta Method", reason="alpha is what makes beta work")],
+        ),
+        D.Concept(name="Beta Method", summary="Beta does another thing.", why="it uses alpha"),
+    ]
+    monkeypatch.setattr(D, "extract_concepts", lambda source, limit=8: concepts)
+    monkeypatch.setattr(D, "call_llm", lambda *a, **k: "A summary.")
+    monkeypatch.setattr(D, "_neighbours", lambda db, concept, k=3: [])
+    monkeypatch.setattr(D, "_embed_concept", lambda concept: None)
+
+    made = []
+    try:
+        with session_scope() as db:
+            src, _ = store_source(db, title="Cross Link Source", body="body", subtype="paste")
+            made.append(src.slug)
+            result = D.distill(db, src)
+            made += result.created + ([result.literature_slug] if result.literature_slug else [])
+
+            assert result.cross_links >= 1, "no idea-to-idea link was written"
+            alpha = get_doc(db, "alpha-mechanism").body
+            beta = get_doc(db, "beta-method").body
+            # Reciprocal: a relationship visible from only one side is half a relationship.
+            assert "[[beta-method]]" in alpha
+            assert "[[alpha-mechanism]]" in beta
+            assert "alpha is what makes beta work" in alpha
+    finally:
+        with session_scope() as db:
+            for slug in made:
+                delete_doc(db, slug)
+
+
+def test_a_relation_without_a_reason_is_discarded():
+    """An unjustified link is the noise this pipeline is meant to avoid."""
+    from wiki_api.services.distill import _concepts_from
+
+    got = _concepts_from(
+        {"concepts": [{"name": "Thing", "summary": "s", "why": "w", "relates_to": [
+            {"name": "Other", "reason": "because it extends it"},
+            {"name": "Unjustified"},
+            {"reason": "orphan reason"},
+        ]}]},
+        limit=8,
+    )
+    assert [r.name for r in got[0].relates_to] == ["Other"]
+
+
+# --- queue retention ----------------------------------------------------------
+
+
+def test_sweep_clears_finished_payloads_but_spares_live_jobs():
+    """Uploads live in Job.payload so a redeploy cannot lose them; nothing removed them after."""
+    from datetime import timedelta
+
+    from wiki_api.database import Job, session_scope, utcnow
+    from wiki_api.jobs.runner import sweep_finished_jobs
+
+    ids = {}
+    with session_scope() as db:
+        old_done = Job(kind="pdf", status="done", payload="x" * 5000,
+                       finished_at=utcnow() - timedelta(days=3))
+        recent_done = Job(kind="pdf", status="done", payload="y" * 100, finished_at=utcnow())
+        queued = Job(kind="pdf", status="queued", payload="z" * 100)
+        db.add_all([old_done, recent_done, queued])
+        db.commit()
+        ids = {"old": old_done.id, "recent": recent_done.id, "queued": queued.id}
+
+    got = sweep_finished_jobs()
+    assert got["payloads_cleared"] >= 1
+
+    with session_scope() as db:
+        assert db.get(Job, ids["old"]).payload is None, "a stale payload should be gone"
+        assert db.get(Job, ids["recent"]).payload is not None, "still retryable"
+        assert db.get(Job, ids["queued"]).payload is not None, "never touch unfinished work"
+        for job_id in ids.values():
+            db.delete(db.get(Job, job_id))

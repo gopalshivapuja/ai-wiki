@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Upload
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from wiki_api.auth import get_current_user
+from wiki_api.auth import get_current_user, require_admin
 from wiki_api.database import Job, User, get_db, utcnow
 from wiki_api.jobs.runner import enqueue, job_to_dict
 from wiki_api.services.crawl import DEFAULT_MAX_DEPTH, DEFAULT_MAX_PAGES, HARD_MAX_PAGES
@@ -73,27 +73,23 @@ async def _read_upload(file: UploadFile, max_bytes: int) -> bytes:
 
 
 @router.post("/web")
-def job_web(body: UrlBody, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def job_web(body: UrlBody, db: Session = Depends(get_db), user: User = Depends(require_admin)):
     return _submit(db, "web", body.model_dump())
 
 
 @router.post("/arxiv")
-def job_arxiv(
-    body: ArxivBody, db: Session = Depends(get_db), user: User = Depends(get_current_user)
-):
+def job_arxiv(body: ArxivBody, db: Session = Depends(get_db), user: User = Depends(require_admin)):
     return _submit(db, "arxiv", body.model_dump())
 
 
 @router.post("/youtube")
-def job_youtube(
-    body: UrlBody, db: Session = Depends(get_db), user: User = Depends(get_current_user)
-):
+def job_youtube(body: UrlBody, db: Session = Depends(get_db), user: User = Depends(require_admin)):
     return _submit(db, "youtube", body.model_dump())
 
 
 @router.post("/transcribe")
 def job_transcribe(
-    body: UrlBody, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+    body: UrlBody, db: Session = Depends(get_db), user: User = Depends(require_admin)
 ):
     from wiki_api.services.transcribe import is_configured, stt_provider
 
@@ -108,29 +104,25 @@ def job_transcribe(
 
 @router.post("/youtube-channel")
 def job_youtube_channel(
-    body: ChannelBody, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+    body: ChannelBody, db: Session = Depends(get_db), user: User = Depends(require_admin)
 ):
     """Queue every video on a channel or playlist. Re-running skips what is already stored."""
     return _submit(db, "youtube-channel", body.model_dump())
 
 
 @router.post("/crawl")
-def job_crawl(
-    body: CrawlBody, db: Session = Depends(get_db), user: User = Depends(get_current_user)
-):
+def job_crawl(body: CrawlBody, db: Session = Depends(get_db), user: User = Depends(require_admin)):
     return _submit(db, "crawl", body.model_dump())
 
 
 @router.post("/paste")
-def job_paste(
-    body: PasteBody, db: Session = Depends(get_db), user: User = Depends(get_current_user)
-):
+def job_paste(body: PasteBody, db: Session = Depends(get_db), user: User = Depends(require_admin)):
     return _submit(db, "paste", body.model_dump())
 
 
 @router.post("/summarize")
 def job_summarize(
-    body: SummarizeBody, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+    body: SummarizeBody, db: Session = Depends(get_db), user: User = Depends(require_admin)
 ):
     return _submit(db, "summarize", body.model_dump())
 
@@ -142,7 +134,7 @@ async def job_pdf(
     moc: str | None = Form(default=None),
     moc_title: str | None = Form(default=None),
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
 ):
     if not (file.filename or "").lower().endswith(".pdf"):
         raise HTTPException(400, "Only .pdf files are supported")
@@ -162,7 +154,7 @@ async def job_import(
     file: UploadFile = File(...),
     distill: bool = Form(default=False),
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
 ):
     """Restore an export, or import any folder of markdown with YAML frontmatter.
 
@@ -199,7 +191,7 @@ def get_job(job_id: int, db: Session = Depends(get_db), user: User = Depends(get
 
 
 @router.post("/{job_id}/cancel")
-def cancel_job(job_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def cancel_job(job_id: int, db: Session = Depends(get_db), user: User = Depends(require_admin)):
     job = db.get(Job, job_id)
     if not job:
         raise HTTPException(404, "Job not found")
@@ -219,7 +211,7 @@ def cancel_job(job_id: int, db: Session = Depends(get_db), user: User = Depends(
 
 
 @router.post("/{job_id}/retry")
-def retry_job(job_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def retry_job(job_id: int, db: Session = Depends(get_db), user: User = Depends(require_admin)):
     job = db.get(Job, job_id)
     if not job:
         raise HTTPException(404, "Job not found")

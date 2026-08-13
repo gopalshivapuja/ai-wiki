@@ -24,6 +24,12 @@ COPY seed/ seed/
 
 RUN pip install --no-cache-dir .
 
+# Bake the embedding model into the image. Downloading ~90MB on first boot would delay the
+# first request and re-download on every redeploy, since the container disk is ephemeral.
+ENV FASTEMBED_CACHE_PATH=/app/.fastembed
+RUN python -c "from fastembed import TextEmbedding; TextEmbedding(model_name='BAAI/bge-small-en-v1.5')" \
+    && chmod -R a+rX /app/.fastembed
+
 COPY --from=web /web/dist /app/static
 
 ENV STATIC_DIR=/app/static

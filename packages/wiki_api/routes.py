@@ -11,7 +11,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 from wiki_core.llm import LLMNotConfigured
 
-from wiki_api.auth import get_current_user
+from wiki_api.auth import get_current_user, require_admin
 from wiki_api.database import (
     NOTE,
     NOTE_SUBTYPES,
@@ -43,6 +43,7 @@ from wiki_api.services.distill import UNREVIEWED
 from wiki_api.services.fetch import FetchError
 from wiki_api.services.graph import build_graph, build_neighbourhood, orphans, stats
 from wiki_api.services.ingest import ai_query
+from wiki_api.services.relate import duplicate_pairs, embed_missing, similar
 from wiki_api.services.search import search
 
 logger = logging.getLogger(__name__)
@@ -291,6 +292,37 @@ def api_llms_txt(db: Session = Depends(get_db), user: User = Depends(get_current
     return "\n".join(lines)
 
 
+@router.get("/related/{slug}")
+def api_related(
+    slug: str,
+    k: int = Query(8, ge=1, le=20),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Notes near this one in meaning, whether or not anything links them.
+
+    Empty until embeddings exist — the wiki works without them, it is just less associative.
+    """
+    _require(db, slug)
+    return {"related": similar(db, slug, k=k)}
+
+
+@router.post("/maintenance/embed")
+def api_embed(
+    force: bool = Query(False),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+):
+    """Backfill embeddings. Idempotent, so it is safe to re-run after adding notes."""
+    return embed_missing(db, force=force)
+
+
+@router.get("/maintenance/duplicates")
+def api_duplicates(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Notes that look like the same idea written twice. Reported, never merged for you."""
+    return {"pairs": duplicate_pairs(db)}
+
+
 @router.get("/orphans")
 def api_orphans(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """Notes nothing links to, and links pointing at notes that do not exist yet."""
@@ -326,7 +358,7 @@ def api_log(
 
 @router.post("/documents", status_code=201)
 def api_create(
-    body: NoteCreate, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+    body: NoteCreate, db: Session = Depends(get_db), user: User = Depends(require_admin)
 ):
     if body.type not in NOTE_SUBTYPES:
         raise HTTPException(400, f"Unknown note type '{body.type}'")
@@ -342,7 +374,7 @@ def api_update(
     slug: str,
     body: NoteUpdate,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
 ):
     doc = _require(db, slug)
     if body.type and body.type not in NOTE_SUBTYPES:
@@ -366,7 +398,7 @@ def api_restore(
     slug: str,
     revision_id: int,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
 ):
     doc = _require(db, slug)
     try:
@@ -376,7 +408,7 @@ def api_restore(
 
 
 @router.delete("/documents/{slug}", status_code=204)
-def api_delete(slug: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def api_delete(slug: str, db: Session = Depends(get_db), user: User = Depends(require_admin)):
     if not delete_doc(db, slug):
         raise HTTPException(404, f"Nothing found at '{slug}'")
 
@@ -412,7 +444,7 @@ def api_review_queue(
 
 @router.post("/review/approve")
 def api_review_approve(
-    body: ApproveBody, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+    body: ApproveBody, db: Session = Depends(get_db), user: User = Depends(require_admin)
 ):
     """Drop the unreviewed tag. With no slugs given, approves everything pending."""
     q = db.query(Document).filter(Document.tags.contains([UNREVIEWED]))

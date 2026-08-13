@@ -33,6 +33,11 @@ logger = logging.getLogger(__name__)
 
 JOB_TIMEOUT_SECONDS = int(os.environ.get("JOB_TIMEOUT_SECONDS", "1800"))
 SHUTDOWN_GRACE_SECONDS = float(os.environ.get("SHUTDOWN_GRACE_SECONDS", "25"))
+# Retention for the queue table. A payload is dead weight once its job has finished and is
+# past retrying; the row itself is worth keeping longer, since /api/jobs is the only history
+# of what was ingested.
+JOB_PAYLOAD_TTL_SECONDS = int(os.environ.get("JOB_PAYLOAD_TTL_SECONDS", str(24 * 3600)))
+JOB_ROW_TTL_SECONDS = int(os.environ.get("JOB_ROW_TTL_SECONDS", str(30 * 24 * 3600)))
 POLL_INTERVAL = float(os.environ.get("JOB_POLL_INTERVAL", "10"))
 RUNNER_ENABLED = os.environ.get("JOB_RUNNER_ENABLED", "1") not in ("0", "false", "False")
 
@@ -133,6 +138,54 @@ def reap_orphans() -> int:
     return count
 
 
+FINISHED = ("done", "failed", "cancelled")
+
+
+def sweep_finished_jobs() -> dict:
+    """Drop upload bytes from finished jobs, and delete the old rows entirely.
+
+    Job.payload carries the uploaded file (base64 PDFs and import archives) so a redeploy
+    between enqueue and execution cannot lose it. Nothing ever removed it afterwards, so the
+    queue table grew without bound and a hobby-tier database paid to store every PDF twice —
+    once as the source document, once as the upload that created it.
+
+    A payload is only useful while the job might still run or be retried, which is what makes
+    dropping it from a finished job safe. Unfinished jobs are never touched.
+    """
+    payload_cutoff = utcnow() - timedelta(seconds=JOB_PAYLOAD_TTL_SECONDS)
+    row_cutoff = utcnow() - timedelta(seconds=JOB_ROW_TTL_SECONDS)
+
+    with session_scope() as db:
+        stale_payloads = (
+            db.query(Job)
+            .filter(
+                Job.status.in_(FINISHED),
+                Job.payload.isnot(None),
+                Job.finished_at < payload_cutoff,
+            )
+            .all()
+        )
+        freed = 0
+        for job in stale_payloads:
+            freed += len(job.payload or "")
+            job.payload = None
+
+        deleted = (
+            db.query(Job)
+            .filter(Job.status.in_(FINISHED), Job.finished_at < row_cutoff)
+            .delete(synchronize_session=False)
+        )
+
+    if freed or deleted:
+        logger.info(
+            "Job sweep: cleared %d payload(s) (%.1f MB), deleted %d row(s)",
+            len(stale_payloads),
+            freed / 1_000_000,
+            deleted,
+        )
+    return {"payloads_cleared": len(stale_payloads), "bytes_freed": freed, "rows_deleted": deleted}
+
+
 def _finish(job_id: int, status: str, result: dict | None = None, error: str | None = None) -> None:
     # A fresh session on purpose: if the handler's session died we must still record this.
     with session_scope() as db:
@@ -224,6 +277,8 @@ class JobRunner:
         _RUNNER = self
         self._loop = asyncio.get_running_loop()
         await asyncio.to_thread(reap_orphans)
+        # Runs after reaping so a job just marked failed can shed its payload in the same pass.
+        await asyncio.to_thread(sweep_finished_jobs)
         self._stopping = False
         self._task = asyncio.create_task(self._loop_forever(), name="job-worker")
         logger.info("Job runner started")
