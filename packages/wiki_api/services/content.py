@@ -514,6 +514,16 @@ def import_markdown(db: Session, path: Path, subtype_hint: str | None = None) ->
         doc.body = body.strip()
         doc.subtype = subtype
         doc.tags = fm.get("tags") or []
+        # Re-apply the frontmatter's own fields too. Updating only title/body/subtype made the
+        # round trip lossy for documents that already existed: to_markdown() writes class, url
+        # and aliases, and re-importing dropped them silently. It also left no way to correct a
+        # transcript stored as a note — the class it was first given was permanent.
+        doc.doc_class = doc_class
+        doc.immutable = doc_class == SOURCE
+        if fm.get("url"):
+            doc.url = fm["url"]
+        if fm.get("aliases"):
+            doc.extra = {**(doc.extra or {}), "aliases": fm["aliases"]}
         doc.updated_at = utcnow()
     else:
         doc = Document(

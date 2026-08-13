@@ -746,3 +746,33 @@ def test_two_sources_sharing_a_concept_produce_one_note(client, auth, monkeypatc
             doc = get_doc(db, slug)
             for link in parse_wikilinks(doc.body or ""):
                 assert index.resolve(link.target), f"{slug} links to missing {link.target!r}"
+
+
+def test_reimport_corrects_class_url_and_aliases(client, auth, tmp_path):
+    """The update branch dropped every frontmatter field except title, body and subtype.
+
+    A transcript that landed as a note could never be corrected, and re-importing an export
+    silently stripped url and aliases from documents that already existed.
+    """
+    from wiki_api.database import session_scope
+    from wiki_api.services.content import delete_doc, get_doc, import_markdown
+
+    path = tmp_path / "src-misfiled-lecture.md"
+    path.write_text('---\ntitle: "Misfiled Lecture"\nclass: note\ntype: page\n---\n\nBody.\n')
+    with session_scope() as db:
+        first = import_markdown(db, path)
+        assert first.doc_class == "note"
+        assert first.immutable is False
+        slug = first.slug
+
+        path.write_text(
+            '---\ntitle: "Misfiled Lecture"\nclass: source\ntype: youtube\n'
+            'url: "https://youtu.be/abc"\naliases: ["ML"]\n---\n\nBody.\n'
+        )
+        import_markdown(db, path)
+        fixed = get_doc(db, slug)
+        assert fixed.doc_class == "source"
+        assert fixed.immutable is True, "captured material must be protected from edits"
+        assert fixed.url == "https://youtu.be/abc"
+        assert fixed.extra.get("aliases") == ["ML"]
+        delete_doc(db, slug)
