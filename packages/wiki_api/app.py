@@ -44,7 +44,7 @@ STATIC_DIR = _resolve_static_dir()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    from wiki_api.database import init_db, session_scope
+    from wiki_api.database import ensure_users, init_db, session_scope
     from wiki_api.jobs.runner import JobRunner
     from wiki_api.schema_ddl import apply_schema_ddl
     from wiki_api.services.archive import default_seed_dir, seed_if_empty
@@ -59,6 +59,9 @@ async def lifespan(app: FastAPI):
     # generated column and indexes, and both must precede any read of seeded content.
     init_db()
     apply_schema_ddl()
+    # After the DDL: these read columns the DDL is responsible for adding to tables that
+    # already exist, which create_all() never touches.
+    ensure_users()
     with session_scope() as db:
         seed_if_empty(db, default_seed_dir())
 

@@ -218,7 +218,18 @@ def session_scope() -> Iterator[Session]:
 
 
 def init_db() -> None:
+    """Create missing tables. Nothing more.
+
+    User bootstrap deliberately does NOT live here: it queries columns that apply_schema_ddl()
+    may not have added yet. Adding `users.role` and calling _ensure_admin() from here failed
+    boot with "column users.role does not exist", because create_all() had left the existing
+    table untouched and the DDL had not run. See ensure_users(), called after the DDL.
+    """
     Base.metadata.create_all(bind=engine)
+
+
+def ensure_users() -> None:
+    """Sync the accounts from the environment. Must run after apply_schema_ddl()."""
     _ensure_admin()
     _ensure_demo()
 

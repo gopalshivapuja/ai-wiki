@@ -1094,7 +1094,6 @@ def test_schema_ddl_restores_columns_create_all_would_not(client):
     never exercises.
     """
     from sqlalchemy import inspect, text
-
     from wiki_api.database import engine
     from wiki_api.schema_ddl import apply_schema_ddl
 
@@ -1140,3 +1139,38 @@ def test_every_model_column_is_creatable_on_an_existing_table():
                 assert f"add column if not exists {column.name}" in ddl, (
                     f"{table}.{column.name} is in the model but has no ADD COLUMN statement"
                 )
+
+
+def test_boot_sequence_survives_a_database_missing_the_new_columns(client):
+    """The order in app.py's lifespan is load-bearing, not decorative.
+
+    _ensure_admin() reads users.role. It used to run inside init_db(), before
+    apply_schema_ddl() had added that column to an existing table, so a real deploy died with
+    "column users.role does not exist" while a locally-created schema was fine. This replays
+    the boot sequence against a database that lacks the column.
+    """
+    import sqlalchemy.exc
+    from sqlalchemy import text
+
+    from wiki_api.database import engine, ensure_users, init_db
+    from wiki_api.schema_ddl import apply_schema_ddl
+
+    def drop_role():
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE users DROP COLUMN IF EXISTS role"))
+
+    # Wrong order: the failure the deploy actually hit.
+    drop_role()
+    init_db()
+    with pytest.raises(sqlalchemy.exc.ProgrammingError):
+        ensure_users()
+
+    # Right order: create tables, add columns, then touch rows.
+    drop_role()
+    init_db()
+    apply_schema_ddl()
+    ensure_users()
+
+    with engine.begin() as conn:
+        role = conn.execute(text("SELECT role FROM users LIMIT 1")).scalar()
+    assert role in ("admin", "reader")
