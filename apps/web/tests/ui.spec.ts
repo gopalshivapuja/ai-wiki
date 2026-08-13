@@ -40,7 +40,8 @@ test.describe('wiki navigation', () => {
     // The body arrives from an async fetch, so wait for it rather than racing the render.
     await expect(links.first()).toBeVisible();
     const count = await links.count();
-    expect(count).toBeGreaterThan(8);
+    // Not a size assertion: CI runs against a small fixture wiki, a real one has hundreds.
+    expect(count).toBeGreaterThan(2);
 
     // No link may be an empty href, and none may open a new tab.
     for (let i = 0; i < count; i++) {
@@ -94,6 +95,11 @@ test.describe('wiki navigation', () => {
   test('scroll resets when following a link', async ({ page }) => {
     await page.goto(`${BASE}/doc/index`);
     await expect(page.locator('.markdown-body a[href^="/doc/"]').first()).toBeVisible();
+    // Only meaningful on a page tall enough to scroll; CI's fixture wiki is not.
+    const scrollable = await page.evaluate(
+      () => document.documentElement.scrollHeight > window.innerHeight + 200,
+    );
+    test.skip(!scrollable, "this wiki's index is too short to scroll");
     await page.evaluate(() => window.scrollTo(0, 600));
     expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(100);
     await page.locator('.markdown-body a[href^="/doc/"]').first().click();
@@ -146,10 +152,12 @@ test.describe('ask ai', () => {
   test.beforeEach(async ({ page }) => login(page));
 
   test('citations appear long before the answer finishes', async ({ page, request }) => {
-    const models = await request.get(`${BASE}/api/llm/models`, {
+    const res = await request.get(`${BASE}/api/llm/models`, {
       headers: { Authorization: `Bearer ${await tokenFor(request)}` },
     });
-    test.skip(!models.ok(), 'no LLM configured, so there is nothing to stream');
+    // The route answers 200 without a key; what matters is whether it settled on a model.
+    const status = res.ok() ? await res.json() : null;
+    test.skip(!status?.will_use, 'no LLM configured, so there is no answer to stream');
     test.setTimeout(180_000);
     await page.goto(`${BASE}/ask`);
     await page.getByLabel('Your question').fill('What is attention?');
