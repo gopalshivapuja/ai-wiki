@@ -776,3 +776,42 @@ def test_reimport_corrects_class_url_and_aliases(client, auth, tmp_path):
         assert fixed.url == "https://youtu.be/abc"
         assert fixed.extra.get("aliases") == ["ML"]
         delete_doc(db, slug)
+
+
+def test_export_is_readable_past_the_drain_boundary(client, auth):
+    """A wiki larger than one drain chunk must still produce an extractable zip.
+
+    export_stream drains its buffer every chunk_docs documents. Draining used to reset the
+    stream position, so every central-directory offset written after the first drain pointed
+    at the wrong byte: `unzip` reported "bad zipfile offset" and no file could be extracted.
+
+    The original round-trip test missed it twice over — its wiki was smaller than one chunk,
+    and it only called namelist(), which reads the central directory without touching an
+    entry. This one writes past the boundary and reads every member.
+    """
+    from wiki_api.database import session_scope
+    from wiki_api.services.archive import export_stream
+    from wiki_api.services.content import create_note, delete_doc
+
+    made = []
+    with session_scope() as db:
+        for i in range(60):
+            made.append(
+                create_note(db, f"Drain Boundary Note {i}", f"Body {i}.", subtype="zettel").slug
+            )
+
+    try:
+        with session_scope() as db:
+            # chunk_docs=10 guarantees several drains regardless of the rest of the fixture.
+            data = b"".join(export_stream(db, chunk_docs=10))
+
+        zf = zipfile.ZipFile(io.BytesIO(data))
+        assert zf.testzip() is None, "a member failed its CRC or could not be located"
+        # Reading every entry is what actually exercises the offsets.
+        for name in zf.namelist():
+            assert zf.read(name) is not None
+        assert len([n for n in zf.namelist() if n.endswith(".md")]) > 60
+    finally:
+        with session_scope() as db:
+            for slug in made:
+                delete_doc(db, slug)

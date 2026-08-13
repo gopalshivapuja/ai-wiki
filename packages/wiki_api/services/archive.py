@@ -31,20 +31,53 @@ def _archive_path(doc: Document) -> str:
     return f"{folder}/{doc.slug}.md"
 
 
+class _DrainableBuffer(io.RawIOBase):
+    """A write-only sink that can be emptied without losing its stream position.
+
+    zipfile records every entry's offset in the central directory from ``fp.tell()``. The
+    previous implementation drained with ``seek(0)`` + ``truncate(0)``, which reset ``tell()``
+    to zero, so each offset after the first drain pointed at the wrong byte and the archive
+    could not be extracted — "bad zipfile offset".
+
+    It only bit above ``chunk_docs`` documents, because a smaller wiki is written in a single
+    piece and never drains mid-stream. That is why the round-trip test never caught it while
+    every real backup of a 600-document wiki was unreadable.
+    """
+
+    def __init__(self) -> None:
+        self._parts: list[bytes] = []
+        self._pos = 0
+
+    def writable(self) -> bool:
+        return True
+
+    # Reported as non-seekable so zipfile never tries to rewind into bytes we already yielded.
+    def seekable(self) -> bool:
+        return False
+
+    def write(self, b) -> int:
+        data = bytes(b)
+        self._parts.append(data)
+        self._pos += len(data)
+        return len(data)
+
+    def tell(self) -> int:
+        return self._pos
+
+    def drain(self) -> bytes:
+        data = b"".join(self._parts)
+        self._parts.clear()
+        return data
+
+
 def export_stream(db: Session, chunk_docs: int = 50) -> Iterator[bytes]:
     """Yield a zip of the whole wiki.
 
-    Written to an in-memory buffer that is drained and truncated as it fills, so a large
-    wiki never has to fit in the container's memory at once.
+    Written to a buffer that is drained as it fills, so a large wiki never has to fit in the
+    container's memory at once.
     """
-    buffer = io.BytesIO()
+    buffer = _DrainableBuffer()
     zf = zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED)
-
-    def drain() -> bytes:
-        data = buffer.getvalue()
-        buffer.seek(0)
-        buffer.truncate(0)
-        return data
 
     written = 0
     # yield_per streams rows instead of materialising every body at once.
@@ -52,7 +85,7 @@ def export_stream(db: Session, chunk_docs: int = 50) -> Iterator[bytes]:
         zf.writestr(_archive_path(doc), to_markdown(doc))
         written += 1
         if written % chunk_docs == 0:
-            chunk = drain()
+            chunk = buffer.drain()
             if chunk:
                 yield chunk
 
@@ -65,7 +98,7 @@ def export_stream(db: Session, chunk_docs: int = 50) -> Iterator[bytes]:
         "markdown editor.\n",
     )
     zf.close()
-    yield drain()
+    yield buffer.drain()
     logger.info("Exported %d documents", written)
 
 
