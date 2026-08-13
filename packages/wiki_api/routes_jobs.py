@@ -56,6 +56,14 @@ class SummarizeBody(Filing):
     max_new: int | None = Field(default=None, ge=0, le=12)
 
 
+class CrossLinkBody(BaseModel):
+    """Link one note, or every note in a collection, to related notes from other sources."""
+
+    slug: str | None = Field(default=None, max_length=200)
+    collection: str | None = Field(default=None, max_length=120)
+    limit: int = Field(default=200, ge=1, le=1000)
+
+
 class ChannelBody(Filing):
     url: str = Field(min_length=1, max_length=2000)
     limit: int | None = Field(default=None, ge=1, le=500)
@@ -128,6 +136,46 @@ def job_summarize(
     body: SummarizeBody, db: Session = Depends(get_db), user: User = Depends(require_admin)
 ):
     return _submit(db, "summarize", body.model_dump())
+
+
+@router.post("/crosslink")
+def job_crosslink(
+    body: CrossLinkBody, db: Session = Depends(get_db), user: User = Depends(require_admin)
+):
+    """Queue cross-source linking for one note, or for a whole collection's concepts.
+
+    Distillation only links concepts extracted from the same source, so a wiki built from many
+    sources ends up as clusters with little between them. This is what joins them.
+    """
+    from wiki_core.utils import parse_wikilinks
+
+    from wiki_api.database import NOTE, Document
+
+    if body.slug:
+        return _submit(db, "crosslink", {"slug": body.slug})
+
+    # Only notes with a vector: candidates come from semantic neighbours, so a note without
+    # one would find nothing and burn a model call discovering that.
+    q = db.query(Document.slug).filter(
+        Document.doc_class == NOTE,
+        Document.subtype == "zettel",
+        Document.embedding.isnot(None),
+    )
+
+    if body.collection:
+        # Concepts a collection's literature notes point at — one pass over those notes
+        # rather than a lookup per zettel.
+        sources = db.query(Document.id).filter(Document.collection == body.collection).subquery()
+        wanted: set[str] = set()
+        for (text,) in db.query(Document.body).filter(Document.derived_from_id.in_(sources)).all():
+            wanted |= {link.target for link in parse_wikilinks(text or "")}
+        slugs = [row.slug for row in q.all() if row.slug in wanted][: body.limit]
+    else:
+        slugs = [row.slug for row in q.limit(body.limit).all()]
+
+    for slug in slugs:
+        _submit(db, "crosslink", {"slug": slug})
+    return {"queued": len(slugs)}
 
 
 @router.post("/pdf")

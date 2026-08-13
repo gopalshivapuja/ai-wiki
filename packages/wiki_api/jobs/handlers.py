@@ -188,6 +188,46 @@ def handle_distill(params: dict, ctx: JobContext) -> dict:
     return result.as_dict()
 
 
+def handle_crosslink(params: dict, ctx: JobContext) -> dict:
+    """Link one note to related notes from *other* sources.
+
+    Same three phases as distillation, and for the same reason: the model call happens with no
+    session open, so a queue of these cannot exhaust the connection pool.
+    """
+    from wiki_api.services import crosslink
+    from wiki_api.services.content import get_doc
+
+    slug = params["slug"]
+    ctx.progress(0, 3, "Finding candidates")
+    with session_scope() as db:
+        doc = get_doc(db, slug)
+        if doc is None:
+            raise ValueError(f"Nothing found at '{slug}'")
+        options = crosslink.candidates(db, doc)
+        # Detached copies, so the model call needs nothing from the session.
+        subject = doc
+        db.expunge(subject)
+        for o in options:
+            db.expunge(o)
+
+    if not options:
+        return {"slug": slug, "candidates": 0, "linked": 0}
+
+    ctx.progress(1, 3, f"Judging {len(options)} candidates")
+    accepted = crosslink.propose(subject, options)
+
+    ctx.progress(2, 3, "Writing links")
+    with session_scope() as db:
+        written = crosslink.apply_links(db, slug, accepted)
+    ctx.progress(3, 3, "Linked")
+    return {
+        "slug": slug,
+        "candidates": len(options),
+        "linked": written,
+        "links": [t for t, _ in accepted],
+    }
+
+
 def handle_summarize(params: dict, ctx: JobContext) -> dict:
     """Re-run distillation for one source, on demand."""
     return handle_distill({"source_slug": params["source_slug"], **params}, ctx)
@@ -212,6 +252,7 @@ HANDLERS: dict[str, JobHandler] = {
     "pdf": handle_pdf,
     "paste": handle_paste,
     "distill": handle_distill,
+    "crosslink": handle_crosslink,
     "summarize": handle_summarize,
     "import": handle_import,
 }

@@ -1548,3 +1548,91 @@ def test_graph_queries_stay_fast_at_current_scale(client, auth):
         assert client.get(path, headers=auth).status_code == 200
         elapsed = time.monotonic() - start
         assert elapsed < budget, f"{path} took {elapsed:.1f}s, over the {budget}s budget"
+
+
+# --- cross-source linking -----------------------------------------------------
+
+
+def test_crosslink_candidates_skip_same_source_and_existing_links(client, auth, fake_embedder):
+    """Concepts from one source are already linked by distillation.
+
+    Re-proposing them wastes a model call and adds nothing; the point of this pass is the
+    links distillation structurally cannot make.
+    """
+    from wiki_api.database import session_scope
+    from wiki_api.services.content import create_note, delete_doc, get_doc, store_source
+    from wiki_api.services.crosslink import candidates
+
+    made = []
+    try:
+        with session_scope() as db:
+            src, _ = store_source(db, title="Shared Source", body="body", subtype="paste")
+            made.append(src.slug)
+            subject = create_note(db, "Crosslink Subject", "About widgets.", subtype="zettel")
+            sibling = create_note(db, "Crosslink Sibling", "About widgets too.", subtype="zettel")
+            other = create_note(db, "Crosslink Other", "About widgets elsewhere.", subtype="zettel")
+            linked = create_note(db, "Crosslink Linked", "Already referenced.", subtype="zettel")
+            made += [subject.slug, sibling.slug, other.slug, linked.slug]
+
+            # sibling shares the subject's source; linked is already referenced
+            subject.derived_from_id = sibling.derived_from_id = src.id
+            db.commit()
+            from wiki_api.services.content import update_note
+
+            update_note(db, get_doc(db, subject.slug), body=f"About widgets. [[{linked.slug}]]")
+
+            found = {d.slug for d in candidates(db, get_doc(db, subject.slug))}
+            assert sibling.slug not in found, "a same-source concept was proposed"
+            assert linked.slug not in found, "an already-linked note was proposed"
+            assert subject.slug not in found
+    finally:
+        with session_scope() as db:
+            for slug in made:
+                delete_doc(db, slug)
+
+
+def test_crosslink_discards_what_the_model_cannot_justify(monkeypatch):
+    """A link with no stated reason is exactly the noise this is meant to avoid."""
+    from wiki_api.database import Document
+    from wiki_api.services import crosslink
+
+    subject = Document(slug="subject", title="Subject", body="Text.", doc_class="note")
+    options = [
+        Document(slug="good", title="Good", body="Text.", doc_class="note"),
+        Document(slug="vague", title="Vague", body="Text.", doc_class="note"),
+    ]
+    monkeypatch.setattr(
+        crosslink,
+        "call_llm_json",
+        lambda *a, **k: {
+            "links": [
+                {"slug": "good", "reason": "is the loss the subject is trained with"},
+                {"slug": "vague"},  # no reason
+                {"slug": "hallucinated", "reason": "not one of the candidates"},
+            ]
+        },
+    )
+    assert crosslink.propose(subject, options) == [
+        ("good", "is the loss the subject is trained with")
+    ]
+
+
+def test_crosslink_writes_both_directions(client, auth, fake_embedder, monkeypatch):
+    from wiki_api.database import session_scope
+    from wiki_api.services import crosslink
+    from wiki_api.services.content import create_note, delete_doc, get_doc
+
+    made = []
+    try:
+        with session_scope() as db:
+            a = create_note(db, "Crosslink Alpha", "Alpha text.", subtype="zettel")
+            b = create_note(db, "Crosslink Beta", "Beta text.", subtype="zettel")
+            made += [a.slug, b.slug]
+            written = crosslink.apply_links(db, a.slug, [(b.slug, "is what alpha is trained with")])
+            assert written == 1
+            assert f"[[{b.slug}]]" in get_doc(db, a.slug).body
+            assert f"[[{a.slug}]]" in get_doc(db, b.slug).body, "the link is only visible one way"
+    finally:
+        with session_scope() as db:
+            for slug in made:
+                delete_doc(db, slug)
