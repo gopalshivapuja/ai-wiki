@@ -416,7 +416,18 @@ export const importArchive = (file: File) => {
   return upload<Job>('/jobs/import', form);
 };
 
-export const listJobs = (limit = 25) => api<{ jobs: Job[] }>(`/jobs?limit=${limit}`);
+export interface JobPage {
+  jobs: Job[];
+  /** Counts for the whole queue, not this page — a page of jobs is not the queue. */
+  total: number;
+  active: number;
+  limit: number;
+  offset: number;
+}
+export const listJobs = (limit = 25, offset = 0, status?: string) =>
+  api<JobPage>(
+    `/jobs?limit=${limit}&offset=${offset}${status ? `&status=${encodeURIComponent(status)}` : ''}`,
+  );
 export const getJob = (id: number) => api<Job>(`/jobs/${id}`);
 export const cancelJob = (id: number) => api<Job>(`/jobs/${id}/cancel`, { method: 'POST' });
 export const retryJob = (id: number) => api<Job>(`/jobs/${id}/retry`, { method: 'POST' });

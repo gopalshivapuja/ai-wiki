@@ -79,6 +79,9 @@ export function JobsPanel({ reloadKey = 0 }: { reloadKey?: number }) {
     reloadKey,
   );
   const jobs = data?.jobs ?? [];
+  // Shown when work is queued beyond this page. Trusting the page alone is what made a
+  // 195-job queue look empty after only its newest 100 had been cancelled.
+  const hidden = Math.max(0, (data?.active ?? 0) - jobs.filter(isJobActive).length);
 
   const act = async (fn: (id: number) => Promise<Job>, id: number) => {
     await fn(id);
@@ -88,7 +91,12 @@ export function JobsPanel({ reloadKey = 0 }: { reloadKey?: number }) {
   return (
     <section className="panel">
       <div className="row space-between">
-        <h2>Activity</h2>
+        <h2>
+          Activity
+          {hidden > 0 && (
+            <span className="muted small"> — {hidden} more queued beyond this page</span>
+          )}
+        </h2>
         <button className="ghost small" onClick={refresh}>
           Refresh
         </button>

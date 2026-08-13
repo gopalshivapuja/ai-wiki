@@ -1261,3 +1261,52 @@ def test_distillation_makes_no_model_calls_while_holding_a_session(monkeypatch):
         with session_scope() as db:
             for slug in made:
                 delete_doc(db, slug)
+
+
+def test_job_listing_pages_and_reports_the_whole_queue(client, auth):
+    """A page of jobs is not the queue.
+
+    /api/jobs returned only the newest 100 with no way to see past them, and silently ignored
+    an offset. A cleanup that trusted it cancelled a third of a 195-job queue and reported
+    nothing left — so the rest ran unattended.
+    """
+    from wiki_api.database import Job, session_scope
+
+    made = []
+    with session_scope() as db:
+        for i in range(12):
+            job = Job(kind="paste", status="queued", params={"n": i})
+            db.add(job)
+        db.commit()
+        made = [j.id for j in db.query(Job).filter(Job.kind == "paste").all()]
+
+    try:
+        first = client.get("/api/jobs?limit=5&offset=0", headers=auth).json()
+        second = client.get("/api/jobs?limit=5&offset=5", headers=auth).json()
+
+        assert len(first["jobs"]) == 5 and len(second["jobs"]) == 5
+        # Pages must not overlap, or paging through the queue silently repeats work.
+        assert not ({j["id"] for j in first["jobs"]} & {j["id"] for j in second["jobs"]})
+        # The counts describe the queue, not the page — that distinction is the bug.
+        assert first["total"] >= 12
+        assert first["total"] > len(first["jobs"])
+        assert first["active"] >= 12
+
+        only_queued = client.get("/api/jobs?status=queued&limit=100", headers=auth).json()
+        assert all(j["status"] == "queued" for j in only_queued["jobs"])
+
+        # Walking every page must reach every job.
+        seen, offset = set(), 0
+        while True:
+            page = client.get(f"/api/jobs?limit=10&offset={offset}", headers=auth).json()
+            if not page["jobs"]:
+                break
+            seen |= {j["id"] for j in page["jobs"]}
+            offset += 10
+        assert set(made) <= seen, "paging missed jobs that exist"
+    finally:
+        with session_scope() as db:
+            for job_id in made:
+                job = db.get(Job, job_id)
+                if job:
+                    db.delete(job)

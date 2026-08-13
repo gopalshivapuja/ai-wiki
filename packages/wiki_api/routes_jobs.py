@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from wiki_api.auth import get_current_user, require_admin
 from wiki_api.database import Job, User, get_db, utcnow
-from wiki_api.jobs.runner import enqueue, job_to_dict
+from wiki_api.jobs.runner import ACTIVE_STATUSES, enqueue, job_to_dict
 from wiki_api.services.crawl import DEFAULT_MAX_DEPTH, DEFAULT_MAX_PAGES, HARD_MAX_PAGES
 from wiki_api.services.fetch import MAX_PDF_BYTES
 
@@ -178,11 +178,32 @@ async def job_import(
 @router.get("")
 def list_jobs(
     limit: int = Query(25, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    status: str | None = Query(
+        default=None, pattern="^(queued|running|cancelling|done|failed|cancelled)$"
+    ),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    jobs = db.query(Job).order_by(Job.created_at.desc(), Job.id.desc()).limit(limit).all()
-    return {"jobs": [job_to_dict(j) for j in jobs]}
+    """List jobs, newest first.
+
+    `total` and `active` describe the whole queue rather than the page, because the page alone
+    is misleading: with 195 jobs enqueued, the newest 100 looked like the entire queue, and a
+    cleanup that trusted it cancelled a third of the work and reported the queue empty.
+    """
+    base = db.query(Job)
+    if status:
+        base = base.filter(Job.status == status)
+    total = base.count()
+    active = db.query(Job).filter(Job.status.in_(ACTIVE_STATUSES)).count()
+    jobs = base.order_by(Job.created_at.desc(), Job.id.desc()).limit(limit).offset(offset).all()
+    return {
+        "jobs": [job_to_dict(j) for j in jobs],
+        "total": total,
+        "active": active,
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 @router.get("/{job_id}")
