@@ -30,6 +30,11 @@ AUTH = {"email": "admin@example.com", "password": "changeme"}
 
 @pytest.fixture(scope="module")
 def client():
+    # Point seeding at the suite's own fixture content. The app no longer ships starter notes,
+    # and tests that need content should say which content they need rather than inheriting
+    # whatever happened to be in seed/.
+    os.environ["WIKI_SEED_DIR"] = str(Path(__file__).parent / "fixtures")
+
     from wiki_api.app import app
     from wiki_api.database import Base, engine
 
@@ -979,9 +984,20 @@ def test_everything_still_works_without_an_embedding_model(client, auth, monkeyp
     assert embed.embed_one("anything") is None
     assert embed.embed_document("t", "b") is None
     with session_scope() as db:
+        # No model means no *new* vectors...
         assert embed_missing(db)["embedded"] == 0
-        assert similar(db, "index") == []
+        # ...but similarity reads vectors already stored, so it keeps working. Only a wiki
+        # that never had a model returns nothing here.
+        assert isinstance(similar(db, "index"), list)
     assert client.get("/api/related/index", headers=auth).status_code == 200
+
+    # A write still succeeds; it simply carries no vector.
+    from wiki_api.services.content import create_note, delete_doc
+
+    with session_scope() as db:
+        note = create_note(db, "No Model Available", "body", subtype="zettel")
+        assert note.embedding is None
+        delete_doc(db, note.slug)
 
 
 def test_distillation_links_ideas_to_each_other(client, auth, monkeypatch):
@@ -1310,3 +1326,102 @@ def test_job_listing_pages_and_reports_the_whole_queue(client, auth):
                 job = db.get(Job, job_id)
                 if job:
                     db.delete(job)
+
+
+# --- embeddings stay current --------------------------------------------------
+
+
+@pytest.fixture
+def fake_embedder(monkeypatch):
+    """A deterministic stand-in, so these tests do not need the real model."""
+    from wiki_api.services import embed
+
+    def fake(title, body):
+        # Distinct per content, so "did this get re-embedded?" is answerable.
+        seed = float(len(f"{title}{body}") % 97) + 1.0
+        return embed.to_bytes([seed, 1.0, 0.5])
+
+    monkeypatch.setattr(embed, "embed_document", fake)
+    return fake
+
+
+def test_every_write_path_embeds_the_document(client, auth, fake_embedder):
+    """Embeddings were set in one place, so most documents never had one.
+
+    A source, a note and a literature note all have to end up searchable by meaning, or
+    "related" goes quiet on new material and convergence stops seeing it.
+    """
+    from wiki_api.database import session_scope
+    from wiki_api.services.content import (
+        create_note,
+        delete_doc,
+        store_source,
+        upsert_literature_note,
+    )
+
+    made = []
+    try:
+        with session_scope() as db:
+            note = create_note(db, "Embedding Write Path", "body", subtype="zettel")
+            made.append(note.slug)
+            assert note.embedding is not None, "create_note left no embedding"
+
+            src, _ = store_source(db, title="Embedding Source", body="text", subtype="paste")
+            made.append(src.slug)
+            assert src.embedding is not None, "store_source left no embedding"
+
+            lit = upsert_literature_note(
+                db, src, title="Embedding Source", body="summary", tags=["literature"]
+            )
+            made.append(lit.slug)
+            assert lit.embedding is not None, "upsert_literature_note left no embedding"
+    finally:
+        with session_scope() as db:
+            for slug in made:
+                delete_doc(db, slug)
+
+
+def test_editing_a_note_refreshes_its_embedding(client, auth, fake_embedder):
+    """A stale vector is worse than none: it keeps matching the text you replaced."""
+    from wiki_api.database import session_scope
+    from wiki_api.services.content import create_note, delete_doc, update_note
+
+    try:
+        with session_scope() as db:
+            note = create_note(db, "Stale Vector", "original body", subtype="zettel")
+            before = note.embedding
+
+            update_note(db, note, body="a completely different body")
+            assert note.embedding != before, "editing the body left the old vector in place"
+
+            # A tag-only edit should not pay for a model call.
+            after_body_edit = note.embedding
+            update_note(db, note, tags=["zettel", "tagged"])
+            assert note.embedding == after_body_edit
+    finally:
+        with session_scope() as db:
+            delete_doc(db, "stale-vector")
+
+
+def test_a_missing_model_leaves_the_previous_vector_alone(client, auth, monkeypatch):
+    """Without a model we keep the old vector: None would hide the note from search entirely."""
+    from wiki_api.database import session_scope
+    from wiki_api.services import embed
+    from wiki_api.services.content import create_note, delete_doc, update_note
+
+    monkeypatch.setattr(embed, "embed_document", lambda title, body: embed.to_bytes([1.0, 2.0]))
+    try:
+        with session_scope() as db:
+            note = create_note(db, "Model Goes Away", "body", subtype="zettel")
+            original = note.embedding
+
+        monkeypatch.setattr(embed, "embed_document", lambda title, body: None)
+        with session_scope() as db:
+            from wiki_api.services.content import get_doc
+
+            note = get_doc(db, "model-goes-away")
+            update_note(db, note, body="new body the model cannot embed")
+            assert note.embedding == original, "a failed embedding must not erase the old one"
+    finally:
+        with session_scope() as db:
+            delete_doc(db, "model-goes-away")

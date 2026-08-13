@@ -457,8 +457,7 @@ def distill(
             continue
         if concept.aliases:
             note.extra = {**(note.extra or {}), "aliases": concept.aliases}
-        note.embedding = _embed_concept(concept)
-        db.commit()
+        db.commit()  # the embedding is set by the mapper event in database.py
         created.append((note.slug, why))
         placed[concept.name] = note.slug
         index = build_link_index(db)  # so the next concept can converge on this one

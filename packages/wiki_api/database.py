@@ -20,6 +20,7 @@ from sqlalchemy import (
     Text,
     create_engine,
 )
+from sqlalchemy import event, inspect as sa_inspect
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
@@ -298,3 +299,41 @@ def _ensure_demo() -> None:
             db.commit()
     finally:
         db.close()
+
+
+# --- keeping embeddings current -----------------------------------------------
+#
+# Registered as mapper events rather than called from each write path on purpose. Embeddings
+# were originally set in exactly one place — new zettels from distillation — so captured
+# sources, literature notes and anything written through the editor never had a vector, and an
+# edited note kept its old one. Nothing failed loudly; "related" simply went quiet on new
+# material and convergence stopped seeing it, which is how duplicate notes come back.
+#
+# Four explicit calls would work until someone adds a fifth write path. This cannot be missed.
+
+
+def _set_embedding(doc: "Document") -> None:
+    """Compute a document's vector. Leaves the old one alone if no model is available."""
+    from wiki_api.services.embed import MODEL_NAME, embed_document
+
+    blob = embed_document(doc.title or "", doc.body or "")
+    if blob is None:
+        # A stale vector still finds the note; None makes it invisible to every search.
+        return
+    doc.embedding = blob
+    doc.embedding_model = MODEL_NAME
+    doc.embedded_at = utcnow()
+
+
+@event.listens_for(Document, "before_insert")
+def _embed_new_document(_mapper, _connection, target: "Document") -> None:
+    if target.embedding is None:
+        _set_embedding(target)
+
+
+@event.listens_for(Document, "before_update")
+def _reembed_changed_document(_mapper, _connection, target: "Document") -> None:
+    """Only when the text actually changed — a tag edit should not pay for a model call."""
+    state = sa_inspect(target)
+    if state.attrs.title.history.has_changes() or state.attrs.body.history.has_changes():
+        _set_embedding(target)

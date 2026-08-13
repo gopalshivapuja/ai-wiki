@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_PAGES = 25
 # Server-side ceiling regardless of what the client asks for.
-HARD_MAX_PAGES = 50
+HARD_MAX_PAGES = 250
 DEFAULT_MAX_DEPTH = 2
 POLITENESS_DELAY = 0.5
 

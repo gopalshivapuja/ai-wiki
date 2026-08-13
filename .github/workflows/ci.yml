@@ -60,6 +60,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
       - name: Build image
         run: docker build -t ai-wiki:test .
 
@@ -84,28 +88,53 @@ jobs:
           curl -sf localhost:8000/ | grep -q 'id="root"' || (docker logs app && exit 1)
           curl -sf localhost:8000/browse | grep -q 'id="root"' || (docker logs app && exit 1)
 
-          echo "--- seeding must have run inside the image ---"
           TOKEN=$(curl -sf -X POST localhost:8000/api/auth/login \
             -H 'Content-Type: application/json' \
             -d '{"email":"admin@example.com","password":"ci-password"}' \
             | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')
+
+          # The image ships no starter content, so the check that matters is the restore
+          # path: import an archive and read it back. That is how a real recovery works, and
+          # it also gives the browser suite something to navigate.
+          echo "--- import must restore content into a fresh image ---"
+          (cd tests/fixtures/seed && zip -qr /tmp/restore.zip .)
+          curl -sf -H "Authorization: Bearer $TOKEN" -F file=@/tmp/restore.zip \
+            localhost:8000/api/jobs/import > /dev/null
+          for i in $(seq 1 30); do
+            COUNT=$(curl -sf -H "Authorization: Bearer $TOKEN" localhost:8000/api/stats \
+              | python3 -c 'import json,sys; print(json.load(sys.stdin)["total_notes"])')
+            [ "$COUNT" -gt 0 ] && break; sleep 2
+          done
           curl -sf -H "Authorization: Bearer $TOKEN" localhost:8000/api/stats \
             | python3 -c '
           import json, sys
           d = json.load(sys.stdin)
-          assert d["total_notes"] > 0, f"image seeded no notes: {d}"
-          assert d["total_sources"] > 0, f"image seeded no sources: {d}"
-          print("seeded", d["total_notes"], "notes and", d["total_sources"], "sources")
+          assert d["total_notes"] > 0 and d["total_sources"] > 0, f"import restored nothing: {d}"
+          print("restored", d["total_notes"], "notes and", d["total_sources"], "sources")
           '
 
-          echo "--- export must produce a usable archive ---"
+          echo "--- export must produce an archive that actually opens ---"
           curl -sf -H "Authorization: Bearer $TOKEN" localhost:8000/api/export -o /tmp/export.zip
           python3 -c '
           import zipfile
-          names = zipfile.ZipFile("/tmp/export.zip").namelist()
-          assert len(names) > 5, names
-          print("export contains", len(names), "files")
+          zf = zipfile.ZipFile("/tmp/export.zip")
+          names = zf.namelist()
+          assert len(names) > 2, names
+          # namelist() reads the central directory and passes on a corrupt archive — which is
+          # exactly how a broken export shipped. Only reading every member catches it.
+          assert zf.testzip() is None, "a member failed its CRC or could not be located"
+          for n in names:
+              zf.read(n)
+          print("export contains", len(names), "readable files")
           '
+
+          echo "--- the browser suite must pass against the real image ---"
+          npm --prefix apps/web ci
+          npx --prefix apps/web playwright install --with-deps chromium
+          BASE_URL=http://localhost:8000 \
+            WIKI_EMAIL=admin@example.com WIKI_PASSWORD=ci-password \
+            npm --prefix apps/web exec -- playwright test --reporter=line \
+            || (docker logs app | tail -30 && exit 1)
 
           echo "--- SIGTERM must shut down cleanly ---"
           docker stop -t 30 app

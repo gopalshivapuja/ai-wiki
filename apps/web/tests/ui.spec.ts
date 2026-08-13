@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
 
 /** End-to-end checks against a running app.
  *
@@ -11,6 +11,14 @@ import { expect, test, type Page } from '@playwright/test';
 const BASE = process.env.BASE_URL || 'http://localhost:8899';
 const EMAIL = process.env.WIKI_EMAIL || 'admin@example.com';
 const PASSWORD = process.env.WIKI_PASSWORD || 'dev';
+
+/** A bearer token, for tests that need to ask the API something directly. */
+async function tokenFor(request: APIRequestContext): Promise<string> {
+  const res = await request.post(`${BASE}/api/auth/login`, {
+    data: { email: EMAIL, password: PASSWORD },
+  });
+  return (await res.json()).access_token;
+}
 
 async function login(page: Page) {
   await page.goto(`${BASE}/login`);
@@ -137,7 +145,11 @@ test.describe('appearance', () => {
 test.describe('ask ai', () => {
   test.beforeEach(async ({ page }) => login(page));
 
-  test('citations appear long before the answer finishes', async ({ page }) => {
+  test('citations appear long before the answer finishes', async ({ page, request }) => {
+    const models = await request.get(`${BASE}/api/llm/models`, {
+      headers: { Authorization: `Bearer ${await tokenFor(request)}` },
+    });
+    test.skip(!models.ok(), 'no LLM configured, so there is nothing to stream');
     test.setTimeout(180_000);
     await page.goto(`${BASE}/ask`);
     await page.getByLabel('Your question').fill('What is attention?');
@@ -189,7 +201,13 @@ test.describe('finding your way in', () => {
   });
 
   test('a note draws its own neighbourhood, and the map opens on demand', async ({ page }) => {
-    await page.goto(`${BASE}/doc/vanishing-gradient`);
+    // Discovered rather than hardcoded: the suite must run against any wiki, including a
+    // freshly built image in CI that holds only the test fixture.
+    await page.goto(`${BASE}/doc/index`);
+    const first = page.locator('.markdown-body a[href^="/doc/"]').first();
+    await expect(first).toBeVisible();
+    await first.click();
+    await expect(page).toHaveURL(/\/doc\//);
 
     const panel = page.locator('.connections');
     await expect(panel).toBeVisible();
