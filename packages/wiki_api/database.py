@@ -19,8 +19,9 @@ from sqlalchemy import (
     String,
     Text,
     create_engine,
+    event,
 )
-from sqlalchemy import event, inspect as sa_inspect
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
@@ -312,7 +313,7 @@ def _ensure_demo() -> None:
 # Four explicit calls would work until someone adds a fifth write path. This cannot be missed.
 
 
-def _set_embedding(doc: "Document") -> None:
+def _set_embedding(doc: Document) -> None:
     """Compute a document's vector. Leaves the old one alone if no model is available."""
     from wiki_api.services.embed import MODEL_NAME, embed_document
 
@@ -326,13 +327,13 @@ def _set_embedding(doc: "Document") -> None:
 
 
 @event.listens_for(Document, "before_insert")
-def _embed_new_document(_mapper, _connection, target: "Document") -> None:
+def _embed_new_document(_mapper, _connection, target: Document) -> None:
     if target.embedding is None:
         _set_embedding(target)
 
 
 @event.listens_for(Document, "before_update")
-def _reembed_changed_document(_mapper, _connection, target: "Document") -> None:
+def _reembed_changed_document(_mapper, _connection, target: Document) -> None:
     """Only when the text actually changed — a tag edit should not pay for a model call."""
     state = sa_inspect(target)
     if state.attrs.title.history.has_changes() or state.attrs.body.history.has_changes():

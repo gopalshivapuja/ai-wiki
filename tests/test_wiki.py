@@ -1425,3 +1425,126 @@ def test_a_missing_model_leaves_the_previous_vector_alone(client, auth, monkeypa
     finally:
         with session_scope() as db:
             delete_doc(db, "model-goes-away")
+
+
+def test_redistilling_does_not_orphan_previously_linked_concepts(client, auth, monkeypatch):
+    """A literature note is often the only thing linking to a concept.
+
+    Rewriting its Concepts list outright orphaned every note the model did not re-extract —
+    71 of them after one re-distillation, with nothing failing.
+    """
+    from wiki_api.database import session_scope
+    from wiki_api.services import distill as D
+    from wiki_api.services.content import create_note, delete_doc, get_doc, store_source
+
+    monkeypatch.setattr(D, "call_llm", lambda *a, **k: "A summary.")
+    monkeypatch.setattr(D, "summarise_source", lambda *a, **k: "A summary.")
+    monkeypatch.setattr(D, "_neighbours", lambda db, concept, k=3: [])
+
+    made = []
+    try:
+        with session_scope() as db:
+            src, _ = store_source(db, title="Orphaning Source", body="body", subtype="paste")
+            made.append(src.slug)
+            first = create_note(db, "First Pass Concept", "body", subtype="zettel")
+            made.append(first.slug)
+
+            # Pass one links the concept the model found then.
+            D.distill(db, src, concepts=[], summary="A summary.")
+            lit = get_doc(db, D._write_literature_note(db, src, [(first.slug, "found first")]).slug)
+            made.append(lit.slug)
+            assert f"[[{first.slug}]]" in lit.body
+
+            # Pass two finds something else entirely.
+            second = create_note(db, "Second Pass Concept", "body", subtype="zettel")
+            made.append(second.slug)
+            D._write_literature_note(db, src, [(second.slug, "found second")])
+
+            lit = get_doc(db, lit.slug)
+            assert f"[[{second.slug}]]" in lit.body, "the new concept was not linked"
+            assert f"[[{first.slug}]]" in lit.body, "re-distillation orphaned the earlier concept"
+    finally:
+        with session_scope() as db:
+            for slug in made:
+                delete_doc(db, slug)
+
+
+# --- the CLI ------------------------------------------------------------------
+
+
+def test_cli_refuses_to_run_without_a_token(monkeypatch):
+    """A missing token should explain how to get one, not raise a stack trace."""
+    from wiki_cli.client import Wiki, WikiError
+
+    monkeypatch.delenv("WIKI_TOKEN", raising=False)
+    with pytest.raises(WikiError) as exc:
+        Wiki(url="https://example.com")
+    assert "auth/login" in str(exc.value)
+
+
+def test_cli_reads_queue_depth_from_the_whole_queue(monkeypatch):
+    """Not from one page — trusting a page is what let 95 jobs run unattended."""
+    from wiki_cli.client import Wiki
+
+    wiki = Wiki(url="https://example.com", token="t")
+    monkeypatch.setattr(wiki, "get", lambda path, **kw: {"jobs": [], "total": 195, "active": 95})
+    assert wiki.queue_depth() == 95
+
+
+def test_cli_writes_a_source_the_importer_can_read(tmp_path):
+    """The CLI's output format has to be exactly what import_markdown parses."""
+    from wiki_api.database import session_scope
+    from wiki_api.services.content import import_markdown
+    from wiki_cli.capture import Video, write_source
+
+    # A title carrying its own double quotes — this broke frontmatter once.
+    video = Video(id="abc12345678", title='Module 6.5: From "Attention" to Llama', duration=600)
+    path = write_source(tmp_path, video, "Some transcript text.", "test-collection", via="whisper")
+
+    with session_scope() as db:
+        doc = import_markdown(db, path)
+        try:
+            assert doc is not None
+            assert doc.doc_class == "source"
+            assert doc.subtype == "youtube"
+            assert doc.url == "https://www.youtube.com/watch?v=abc12345678"
+            assert "Some transcript text." in doc.body
+            # The provenance of a machine transcript must survive into the wiki.
+            assert "Whisper" in doc.body
+        finally:
+            from wiki_api.services.content import delete_doc
+
+            if doc:
+                delete_doc(db, doc.slug)
+
+
+def test_cli_capture_state_resumes_rather_than_restarting(tmp_path):
+    from wiki_cli.capture import CaptureState, Video
+
+    state = CaptureState.load(tmp_path / "state.json")
+    videos = [Video(id="a" * 11, title="One"), Video(id="b" * 11, title="Two")]
+    assert len(state.outstanding(videos)) == 2
+
+    state.done["a" * 11] = {"slug": "src-one"}
+    state.save()
+
+    reloaded = CaptureState.load(tmp_path / "state.json")
+    assert [v.title for v in reloaded.outstanding(videos)] == ["Two"]
+
+
+# --- performance guard --------------------------------------------------------
+
+
+def test_graph_queries_stay_fast_at_current_scale(client, auth):
+    """These load every document body on every request.
+
+    Fine at this size — measured at 0.4-0.6s on a 725-document wiki — but it grows linearly,
+    and this is the tripwire. If it fires, the fix is a links table that stores resolved edges
+    rather than re-parsing every body; see CLAUDE.md.
+    """
+    budget = 5.0
+    for path in ("/api/graph", "/api/orphans", "/api/stats", "/api/documents/index"):
+        start = time.monotonic()
+        assert client.get(path, headers=auth).status_code == 200
+        elapsed = time.monotonic() - start
+        assert elapsed < budget, f"{path} took {elapsed:.1f}s, over the {budget}s budget"

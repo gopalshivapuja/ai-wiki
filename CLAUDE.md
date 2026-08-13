@@ -43,6 +43,17 @@ is why it was removed.
 `GraphView` must stay lazily imported (see `Connections.tsx`): vis-network is ~600KB, and a
 static import put it in the document bundle for every reader who only wanted to read.
 
+### Embeddings are maintained by mapper events
+
+`database.py` registers `before_insert` / `before_update` on `Document`, so **every** write
+path embeds. They were originally set in one place — new zettels from distillation — leaving
+sources, literature notes and edited notes with no vector or a stale one, which quietly
+disabled `/api/related` for new material and let duplicate concepts return. Events rather than
+explicit calls, because the bug was a missed write path and there will be another one.
+
+A failed embedding leaves the previous vector in place: stale still finds the note, `None`
+hides it.
+
 ### Semantic linking
 
 `services/embed.py` gives every document a 384-dimension vector (bge-small via ONNX, baked
@@ -92,7 +103,10 @@ database is not something to ship.
 - `apps/web/` — React 18 + Vite. `hooks.ts` holds `useAsync` / `usePoll` / `useSearch`; use them
   rather than hand-rolling another fetch-plus-loading-plus-error triple (none of the hand-rolled ones
   guarded against out-of-order responses).
-- `seed/` — starter content in the export format. Not read after first boot.
+- `packages/wiki_cli/` — the `wiki` command: bulk ingest, status, backup. Capture runs here
+  rather than on the server because YouTube refuses cloud addresses.
+- No `seed/`. A fresh database starts empty and is restored from an export; the test suite
+  seeds from `tests/fixtures/seed`, which exists so tests state the content they depend on.
 
 ### Boot sequence (`app.py::lifespan`) — the order is load-bearing
 
@@ -133,6 +147,14 @@ Never resolve wikilinks in a loop with per-link queries. Build one `LinkIndex` w
 `build_link_index(db)` and call `.resolve()`. Resolution order: exact slug → uid → `slugify(target)` →
 `src-`-prefixed → case-folded title.
 
+### Performance: when to build a links table
+
+`build_graph`, `build_link_index` and `backlinks` each load every document body and re-parse
+its wikilinks. At 725 documents that is 0.4-0.6s, which is why there is no links table yet —
+`test_graph_queries_stay_fast_at_current_scale` is the tripwire. When it fires, store resolved
+links in their own table written on save, rather than caching, which breaks the moment there
+is a second replica.
+
 ### Background jobs
 
 `jobs/runner.py` is a DB-backed queue drained by **one** asyncio worker. The `jobs` table is the
@@ -140,7 +162,9 @@ source of truth so a redeploy loses nothing.
 
 - Handlers in `jobs/handlers.py` take `(params, ctx)` and **own their sessions** — open
   `session_scope()` only around database work. Passing a session in meant a transcription held a
-  pooled connection for ten minutes and lost the result if it dropped.
+  pooled connection for ten minutes and lost the result if it dropped. `handle_distill` learned
+  the same lesson the hard way: it held a session across two model calls, and a queue of them
+  exhausted the pool and returned 500s for every request, site included.
 - Handlers are plain sync functions run whole in a worker thread; a sync `Session` must stay on one
   thread.
 - `reap_orphans()` assumes exactly one runner process and filters on `started_at` so a booting

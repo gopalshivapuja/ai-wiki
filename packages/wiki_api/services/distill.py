@@ -563,6 +563,39 @@ def summarise_source(title: str, body: str) -> str:
         return "*The summary could not be generated. The captured source is linked below.*"
 
 
+def _merge_concept_links(
+    db: Session, source: Document, links: list[tuple[str, str]]
+) -> list[tuple[str, str]]:
+    """Keep the concepts an earlier pass linked, alongside the ones this pass found.
+
+    A literature note is rewritten every time its source is distilled, and it is often the only
+    thing linking to a concept. Replacing its list outright therefore orphaned every note the
+    model did not happen to re-extract — 71 of them after one re-distillation, silently.
+
+    Existing links are kept only while their destination still exists, so this cannot
+    resurrect a link to something deleted.
+    """
+    existing = (
+        db.query(Document)
+        .filter(Document.derived_from_id == source.id, Document.subtype == "literature")
+        .first()
+    )
+    merged = list(links)
+    seen = {slug for slug, _ in links}
+    if existing:
+        for match in re.finditer(
+            r"^- \[\[([^\]|]+)(?:\|[^\]]*)?\]\]\s*(?:—\s*(.*))?$", existing.body or "", re.M
+        ):
+            slug, why = match.group(1).strip(), (match.group(2) or "").strip()
+            if slug in seen or slug == source.slug:
+                continue
+            if get_doc(db, slug) is None:
+                continue
+            merged.append((slug, why or "a concept from this source."))
+            seen.add(slug)
+    return merged
+
+
 def _write_literature_note(
     db: Session,
     source: Document,
@@ -576,9 +609,12 @@ def _write_literature_note(
     if source.url:
         header += f" · [original]({source.url})"
 
+    merged = _merge_concept_links(db, source, links)
     concepts = ""
-    if links:
-        concepts = "\n\n## Concepts\n\n" + "\n".join(f"- [[{slug}]] — {why}" for slug, why in links)
+    if merged:
+        concepts = "\n\n## Concepts\n\n" + "\n".join(
+            f"- [[{slug}]] — {why}" for slug, why in merged
+        )
 
     return upsert_literature_note(
         db,

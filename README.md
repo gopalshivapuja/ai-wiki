@@ -20,6 +20,10 @@ past a few dozen notes that is a hairball that answers no question.
 captions, speech-to-text for videos without captions, arXiv papers, PDF uploads, and pasted
 text. Long imports run as background jobs with progress and cancel.
 
+**Bulk ingest** — a `wiki` CLI for loading a channel or a documentation site in one command,
+with resumable capture and local transcription for videos YouTube will not serve captions for.
+See **[docs/INGEST.md](docs/INGEST.md)**.
+
 **Ask AI** — retrieval over your own notes, with citations that link back, and one-click
 "save this answer as a note".
 
@@ -95,3 +99,23 @@ claude mcp add ai-wiki \
 **[Full setup, the six tools, worked examples and troubleshooting → `docs/MCP.md`](docs/MCP.md)**
 
 For non-MCP consumers, `GET /api/llms.txt` describes the wiki in the llms.txt convention.
+
+## Bulk ingest
+
+```bash
+pip install -e .            # add '[stt]' for local transcription
+export WIKI_URL=... WIKI_TOKEN=...
+
+wiki status                                          # counts, queue depth, dangling links
+wiki crawl https://docs.example.com --max-pages 200  # a documentation section
+wiki channel https://youtube.com/@x/videos --whisper # a channel, captured locally
+wiki backup ./backups                                # export, verified readable
+```
+
+**[Full guide → docs/INGEST.md](docs/INGEST.md)** — including why YouTube capture has to run on
+your machine rather than on the server.
+
+## A fresh database starts empty
+
+There is no bundled starter content. Restore from an export (`POST /api/jobs/import`) or add a
+source; the tests seed themselves from `tests/fixtures/seed`.
