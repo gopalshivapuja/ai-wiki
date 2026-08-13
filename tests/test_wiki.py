@@ -1206,3 +1206,58 @@ def test_redistillation_can_be_capped_to_linking_only(client, auth, monkeypatch)
         with session_scope() as db:
             for slug in made:
                 delete_doc(db, slug)
+
+
+def test_distillation_makes_no_model_calls_while_holding_a_session(monkeypatch):
+    """The bug that took the site down: a pooled connection held across two model calls.
+
+    Queueing 195 of those exhausted "QueuePool limit of size 5 overflow 5" and every request
+    started returning 500. The handler must do its model work between sessions, not inside one.
+    """
+    import wiki_api.jobs.handlers as H
+    from wiki_api.database import session_scope
+    from wiki_api.services import distill as D
+    from wiki_api.services.content import delete_doc, store_source
+
+    open_sessions = {"count": 0, "during_llm": []}
+    real_scope = H.session_scope
+
+    class Tracking:
+        def __enter__(self):
+            open_sessions["count"] += 1
+            self._cm = real_scope()
+            return self._cm.__enter__()
+
+        def __exit__(self, *a):
+            open_sessions["count"] -= 1
+            return self._cm.__exit__(*a)
+
+    monkeypatch.setattr(H, "session_scope", lambda: Tracking())
+
+    def note_sessions(*args, **kwargs):
+        open_sessions["during_llm"].append(open_sessions["count"])
+        return []
+
+    monkeypatch.setattr(D, "extract_concepts_from", note_sessions)
+    monkeypatch.setattr(D, "summarise_source", lambda *a, **k: (note_sessions(), "A summary.")[1])
+    monkeypatch.setattr(D, "_neighbours", lambda db, concept, k=3: [])
+
+    made = []
+    try:
+        with session_scope() as db:
+            src, _ = store_source(db, title="Pool Safety Source", body="body", subtype="paste")
+            made.append(src.slug)
+
+        ctx = H.JobContext(job_id=0, deadline=time.monotonic() + 300)
+        monkeypatch.setattr(ctx, "progress", lambda *a, **k: None)
+        result = H.handle_distill({"source_slug": made[0]}, ctx)
+        made += [result["literature"]] if result.get("literature") else []
+
+        assert open_sessions["during_llm"], "the model calls never ran"
+        assert all(n == 0 for n in open_sessions["during_llm"]), (
+            f"a session was open during a model call: {open_sessions['during_llm']}"
+        )
+    finally:
+        with session_scope() as db:
+            for slug in made:
+                delete_doc(db, slug)

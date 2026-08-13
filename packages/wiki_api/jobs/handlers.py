@@ -139,15 +139,40 @@ def handle_youtube_channel(params: dict, ctx: JobContext) -> dict:
 
 
 def handle_distill(params: dict, ctx: JobContext) -> dict:
-    """Connect a captured source to the rest of the wiki."""
+    """Connect a captured source to the rest of the wiki.
+
+    Three phases, and the middle one deliberately holds no session. Distillation makes two
+    model calls that can each take minutes; running them inside an open session pinned a
+    pooled connection for the whole job, and a queue of them exhausted the pool and returned
+    500s for every request — the site, not just the jobs. Same reason handle_transcribe
+    downloads and transcribes before it opens a session.
+    """
     from wiki_api.services.content import get_doc
 
-    ctx.progress(0, 2, "Reading the source")
+    ctx.progress(0, 3, "Reading the source")
     with session_scope() as db:
         source = get_doc(db, params["source_slug"])
         if source is None:
             raise ValueError(f"Nothing found at '{params['source_slug']}'")
-        ctx.progress(1, 2, "Extracting concepts and linking")
+        slug, title, body = source.slug, source.title, source.body or ""
+        is_source = source.doc_class == "source"
+
+    if not is_source:
+        return {"skipped": "not a captured source", "literature": None, "created": []}
+
+    ctx.progress(1, 3, "Extracting concepts")
+    concepts = []
+    try:
+        concepts = distill.extract_concepts_from(title, body)
+    except Exception as exc:  # a captured source is worth more than a failed distillation
+        logger.warning("Concept extraction failed for %s: %s", slug, exc)
+    summary = distill.summarise_source(title, body)
+
+    ctx.progress(2, 3, "Linking")
+    with session_scope() as db:
+        source = get_doc(db, slug)
+        if source is None:
+            raise ValueError(f"'{slug}' disappeared while it was being distilled")
         result = distill.distill(
             db,
             source,
@@ -156,8 +181,10 @@ def handle_distill(params: dict, ctx: JobContext) -> dict:
             max_new=params.get("max_new")
             if params.get("max_new") is not None
             else distill.MAX_NEW_ZETTELS,
+            concepts=concepts,
+            summary=summary,
         )
-    ctx.progress(2, 2, "Linked")
+    ctx.progress(3, 3, "Linked")
     return result.as_dict()
 
 

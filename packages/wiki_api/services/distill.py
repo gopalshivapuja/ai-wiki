@@ -169,10 +169,13 @@ def _concepts_from(data: dict, limit: int) -> list[Concept]:
 
 
 def extract_concepts(source: Document, limit: int = 8) -> list[Concept]:
+    return extract_concepts_from(source.title, source.body or "", limit)
+
+
+def extract_concepts_from(title: str, body: str, limit: int = 8) -> list[Concept]:
+    """The model call, taking plain strings so it can run with no database session open."""
     data = call_llm_json(
-        _EXTRACT_PROMPT.format(
-            limit=limit, title=source.title, body=(source.body or "")[:SOURCE_CHARS]
-        ),
+        _EXTRACT_PROMPT.format(limit=limit, title=title, body=(body or "")[:SOURCE_CHARS]),
         _EXTRACT_SYSTEM,
     )
     return _concepts_from(data, limit)
@@ -398,8 +401,16 @@ def distill(
     moc_slug: str | None = None,
     moc_title: str | None = None,
     max_new: int = MAX_NEW_ZETTELS,
+    concepts: list[Concept] | None = None,
+    summary: str | None = None,
 ) -> DistillResult:
-    """Summarise a source, then connect it to the rest of the wiki."""
+    """Summarise a source, then connect it to the rest of the wiki.
+
+    Pass `concepts` and `summary` to skip the model calls. Callers holding a pooled connection
+    must do exactly that: a distillation makes two model calls of a minute or more each, and
+    running them inside an open session pinned a connection for the duration. Queue a few
+    dozen of those and the pool is gone — which took the whole site down, not just the jobs.
+    """
     result = DistillResult()
     if source.doc_class != "source":
         result.skipped = "not a captured source"
@@ -407,12 +418,13 @@ def distill(
 
     index = build_link_index(db)
 
-    try:
-        concepts = extract_concepts(source)
-    except Exception as exc:
-        # A source already captured is worth more than a failed distillation; record and move on.
-        logger.warning("Concept extraction failed for %s: %s", source.slug, exc)
-        concepts = []
+    if concepts is None:
+        try:
+            concepts = extract_concepts(source)
+        except Exception as exc:
+            # A captured source is worth more than a failed distillation; record and move on.
+            logger.warning("Concept extraction failed for %s: %s", source.slug, exc)
+            concepts = []
 
     created: list[tuple[str, str]] = []
     linked: list[tuple[str, str]] = []
@@ -458,7 +470,7 @@ def distill(
     # The literature note is written last, referencing only destinations that now exist —
     # which is what stops the dangling links this pipeline used to produce.
     all_links = created + linked
-    result.literature_slug = _write_literature_note(db, source, all_links).slug
+    result.literature_slug = _write_literature_note(db, source, all_links, summary=summary).slug
     result.created = [s for s, _ in created]
     result.linked = [s for s, _ in linked]
 
@@ -541,15 +553,25 @@ SOURCE: {title}
 {body}"""
 
 
-def _write_literature_note(db: Session, source: Document, links: list[tuple[str, str]]) -> Document:
+def summarise_source(title: str, body: str) -> str:
+    """The literature-note model call, taking plain strings so it needs no session."""
     try:
-        summary = call_llm(
-            _SUMMARY_PROMPT.format(title=source.title, body=(source.body or "")[:SOURCE_CHARS]),
-            _SUMMARY_SYSTEM,
+        return call_llm(
+            _SUMMARY_PROMPT.format(title=title, body=(body or "")[:SOURCE_CHARS]), _SUMMARY_SYSTEM
         )
     except Exception as exc:
-        logger.warning("Summary failed for %s: %s", source.slug, exc)
-        summary = "*The summary could not be generated. The captured source is linked below.*"
+        logger.warning("Summary failed for %s: %s", title, exc)
+        return "*The summary could not be generated. The captured source is linked below.*"
+
+
+def _write_literature_note(
+    db: Session,
+    source: Document,
+    links: list[tuple[str, str]],
+    summary: str | None = None,
+) -> Document:
+    if summary is None:
+        summary = summarise_source(source.title, source.body or "")
 
     header = f"# {source.title}\n\n**Source:** [[{source.slug}|{source.title}]]"
     if source.url:
