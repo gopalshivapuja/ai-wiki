@@ -81,11 +81,15 @@ connection pool to keep it near the low end. Hobby's 5 GB volume cap applies to 
 volume; going past it forces the Pro plan at $20/month. CPU and egress are noise at a few
 hundred requests per day.
 
-**OpenRouter** — `:free` models genuinely cost $0/token but allow only 20 requests/minute
-and **50 requests/day**. A one-time **$10 credit purchase raises that permanently to 1,000
-requests/day**, which is the single highest-leverage thing you can spend money on here. If
-you would rather pay per token, Gemini Flash-class models run about $0.003 per RAG query —
-roughly $0.50–2.40/month at 20 questions a day.
+**OpenRouter** — the default model is now **`google/gemini-2.5-flash-lite`, which is paid**,
+because the free tier's latency was the thing that made the wiki feel broken: tens of seconds
+per call turned a bulk import into a day-long job and Ask AI into a spinner. Expect roughly
+$0.003 per RAG query — $0.50–2.40/month at 20 questions a day — plus cents for a bulk import.
+
+The ladder falls back to Gemma's `:free` models, so the app still works with no credit at all;
+it is just slow. `:free` models cost $0/token but allow only 20 requests/minute and **50
+requests/day**, which a one-time **$10 credit purchase raises permanently to 1,000/day**.
+`GET /api/llm/models` reports which model the app actually chose.
 
 **Transcription** is the only genuinely metered add-on: about $0.36 per hour of audio.
 Ten hours a month is ~$3.60. Self-hosting Whisper instead would need 1–2 GB of resident RAM

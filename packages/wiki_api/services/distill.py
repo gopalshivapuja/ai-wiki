@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
 from sqlalchemy.orm import Session
@@ -47,6 +48,12 @@ SOURCE_CHARS = 24_000
 # one of them, including the second half where the technical depth is.
 CHUNK_OVERLAP = 1_500
 MAX_CHUNKS = 6  # a pathological source costs at most six calls, not fifty
+
+# Windows go to the model together rather than one at a time, so a long lecture costs about
+# one call's latency instead of six. Capped rather than unbounded: the whole of MAX_CHUNKS at
+# once is already the worst case, and a smaller number keeps a bulk import from tripping the
+# provider's per-minute rate limit and being deprioritised for ten minutes.
+MAX_WINDOW_WORKERS = 4
 
 # The literature note reads a spread of the source rather than its opening third. One call
 # either way, so the wider view is free.
@@ -278,28 +285,51 @@ def extract_concepts_from(
 ) -> list[Concept]:
     """The model calls, taking plain strings so they run with no database session open.
 
-    One call per window. Holding no session is load-bearing rather than tidy: an earlier
+    One call per window, and the windows go out concurrently. Holding no session is
+    load-bearing rather than tidy: an earlier
     version kept a pooled connection open across the model calls, and a queue of distillations
     exhausted the pool and returned 500s for every request, the site included. Chunking
     multiplies the calls, so the property matters more here than it did before — which is why
     the cross-window deduplication below is deliberately pure.
     """
     windows = _chunks(body or "")
-    per_chunk: list[list[Concept]] = []
-    for i, window in enumerate(windows, start=1):
-        if on_progress:
-            on_progress(i, len(windows))
-        try:
-            data = call_llm_json(
-                _EXTRACT_PROMPT.format(limit=limit, title=title, body=window), _EXTRACT_SYSTEM
-            )
-        except Exception as exc:
-            # One bad window must not cost the other five.
-            logger.warning(
-                "Extraction failed for window %d/%d of %r: %s", i, len(windows), title, exc
-            )
-            continue
-        per_chunk.append(_concepts_from(data, limit))
+
+    # The windows are independent — each is a prompt and a reply, sharing nothing — so they go
+    # out together instead of one after another. Serially, an eighteen-lecture import spent
+    # most of its wall-clock waiting on a socket: six windows at tens of seconds each, per
+    # lecture, one lecture at a time behind a single job worker.
+    #
+    # Concurrency here is safe precisely because of the property this function already had:
+    # it holds no database session. Threads that held one would multiply the pool exhaustion
+    # that took the site down, which is why the calls take plain strings and return plain data.
+    results: list[list[Concept] | None] = [None] * len(windows)
+    completed = 0
+    with ThreadPoolExecutor(max_workers=min(len(windows), MAX_WINDOW_WORKERS)) as pool:
+        pending = {
+            pool.submit(
+                call_llm_json,
+                _EXTRACT_PROMPT.format(limit=limit, title=title, body=window),
+                _EXTRACT_SYSTEM,
+            ): i
+            for i, window in enumerate(windows)
+        }
+        for future in as_completed(pending):
+            i = pending[future]
+            try:
+                results[i] = _concepts_from(future.result(), limit)
+            except Exception as exc:
+                # One bad window must not cost the other five.
+                logger.warning(
+                    "Extraction failed for window %d/%d of %r: %s", i + 1, len(windows), title, exc
+                )
+            completed += 1
+            if on_progress:
+                on_progress(completed, len(windows))
+
+    # Order is restored before interleaving: _interleave spends the new-note budget by window
+    # position, so it must see the lecture's windows in the order they were spoken, not the
+    # order the model happened to answer in.
+    per_chunk = [r for r in results if r is not None]
 
     seen: dict[str, Concept] = {}
     for concept in _interleave(per_chunk):

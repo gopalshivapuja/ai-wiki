@@ -221,8 +221,14 @@ would be reverted. Changing `ADMIN_EMAIL` creates a *second* admin and leaves th
   result immutable.
 - Creates, edits, deletes, ingests and imports call `log_action()`; it backs `/api/log`.
 - Use `utcnow()` from `database.py`, never `datetime.utcnow()`.
-- Do not hardcode OpenRouter model ids anywhere. `llm.py` validates against the live catalogue and
-  falls back to a discovered free model; `GET /api/llm/models` reports what it chose.
+- Do not hardcode OpenRouter model ids at a call site. The one ordered ladder lives in
+  `llm.py::PREFERRED_MODELS`, is validated against the live catalogue, and degrades to a
+  discovered free model; `GET /api/llm/models` reports what it chose.
+- **The head of that ladder is a paid model, deliberately.** Free models are free in money
+  only: the free Nemotron tier took tens of seconds per call, which made search and Ask AI
+  feel broken and put a bulk import a day away from finishing. Everything below the head is
+  free, so an install with no credit still works — but do not "restore" a free default and
+  call it a saving. At this wiki's volume the bill is cents per import.
 - Frontend errors go through `extractDetail()` in `api.ts` — FastAPI's 422 `detail` is a *list*, and
   `res.statusText` is empty over HTTP/2.
 

@@ -1562,8 +1562,9 @@ def test_a_long_transcript_is_read_past_the_first_window(monkeypatch):
     concepts = D.extract_concepts_from("Long Lecture", body)
 
     assert len(prompts) >= 3, "the transcript was read in one window"
-    # The decisive assertion: the end of the transcript reached the model.
-    assert body[-120:] in prompts[-1]
+    # The decisive assertion: the end of the transcript reached the model. Which prompt holds
+    # it is not fixed — the windows are sent concurrently, so they arrive in any order.
+    assert any(body[-120:] in p for p in prompts)
     # Every window contributed, rather than the budget being spent on the opening.
     assert len(concepts) == len(prompts)
 
@@ -1584,6 +1585,42 @@ def test_a_short_source_is_read_in_exactly_one_call(monkeypatch):
 
     assert len(prompts) == 1
     assert body in prompts[0]
+
+
+def test_windows_are_sent_together_but_folded_in_spoken_order(monkeypatch):
+    """Concurrency must not reorder a lecture.
+
+    The windows go to the model at once, so replies arrive in whatever order the provider
+    answers — routinely not the order the lecture was spoken in. `_interleave` spends the
+    new-note budget by window position, so folding replies in arrival order would hand the
+    budget to whichever window happened to answer first.
+    """
+    import re
+    import threading
+
+    from wiki_api.services import distill as D
+
+    live, peak, lock = 0, 0, threading.Lock()
+
+    def fake(prompt, system):
+        nonlocal live, peak
+        n = int(re.search(r"Paragraph (\d+)\.", prompt).group(1))
+        with lock:
+            live += 1
+            peak = max(peak, live)
+        # The first window is the slowest, so replies come back in reverse order and folding
+        # by arrival would be visibly backwards.
+        time.sleep(0.20 if n == 0 else 0.02)
+        with lock:
+            live -= 1
+        return {"concepts": [{"name": f"Idea At Paragraph {n}", "summary": "s", "why": "w"}]}
+
+    monkeypatch.setattr(D, "call_llm_json", fake)
+    concepts = D.extract_concepts_from("Long Lecture", _long_transcript())
+
+    assert peak > 1, "the windows were sent one at a time"
+    positions = [int(re.search(r"(\d+)$", c.name).group(1)) for c in concepts]
+    assert positions == sorted(positions), f"windows folded out of order: {positions}"
 
 
 def test_one_concept_named_twice_across_windows_becomes_one_concept(monkeypatch):
@@ -1608,6 +1645,10 @@ def test_one_concept_named_twice_across_windows_becomes_one_concept(monkeypatch)
         return reply
 
     monkeypatch.setattr(D, "call_llm_json", fake)
+    # This fake hands out replies by call order, so it needs the calls to happen in window
+    # order to be meaningful. Concurrency is exercised by the test below; what is under test
+    # here is the folding, which is the same either way.
+    monkeypatch.setattr(D, "MAX_WINDOW_WORKERS", 1)
     concepts = D.extract_concepts_from("Long Lecture", _long_transcript())
 
     names = [c.name for c in concepts]
