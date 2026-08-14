@@ -126,11 +126,12 @@ def cmd_channel(wiki: Wiki, args) -> int:
             print("every captured transcript is already in the wiki")
             return 0
         archive = _zip_dir(Path(tmp), Path(tmp) / "import.zip")
-        job = wiki.upload(
-            "/jobs/import",
-            archive,
-            {"distill": "true", "moc": args.moc or "", "moc_title": args.moc_title or ""},
-        )
+        fields = {"distill": "true"}
+        if args.moc:
+            fields["moc"] = args.moc
+        if args.moc_title:
+            fields["moc_title"] = args.moc_title
+        job = wiki.upload("/jobs/import", archive, fields)
     print(f"importing {len(new)} transcripts as job {job['id']}")
 
     finished = wiki.wait_for_job(job["id"], timeout=args.timeout)

@@ -163,7 +163,13 @@ def handle_distill(params: dict, ctx: JobContext) -> dict:
     ctx.progress(1, 3, "Extracting concepts")
     concepts = []
     try:
-        concepts = distill.extract_concepts_from(title, body)
+        concepts = distill.extract_concepts_from(
+            title,
+            body,
+            # A long transcript is read in several windows; report which, so a job that takes
+            # four model calls does not look stalled.
+            on_progress=lambda i, n: ctx.progress(1, 3, f"Extracting concepts ({i}/{n})"),
+        )
     except Exception as exc:  # a captured source is worth more than a failed distillation
         logger.warning("Concept extraction failed for %s: %s", slug, exc)
     summary = distill.summarise_source(title, body)
@@ -178,9 +184,11 @@ def handle_distill(params: dict, ctx: JobContext) -> dict:
             source,
             moc_slug=params.get("moc"),
             moc_title=params.get("moc_title"),
+            # An explicit max_new still wins, so re-distilling with max_new=0 (link only,
+            # mint nothing) keeps working.
             max_new=params.get("max_new")
             if params.get("max_new") is not None
-            else distill.MAX_NEW_ZETTELS,
+            else distill.max_new_for(body),
             concepts=concepts,
             summary=summary,
         )

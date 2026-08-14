@@ -53,7 +53,7 @@ class SummarizeBody(Filing):
     source_slug: str = Field(min_length=1, max_length=200)
     # Lower this when re-distilling material that has already been through the pipeline: the
     # concepts mostly exist by then, so the useful work is linking them, not minting more.
-    max_new: int | None = Field(default=None, ge=0, le=12)
+    max_new: int | None = Field(default=None, ge=0, le=18)
 
 
 class CrossLinkBody(BaseModel):
@@ -204,6 +204,8 @@ async def job_pdf(
 async def job_import(
     file: UploadFile = File(...),
     distill: bool = Form(default=False),
+    moc: str | None = Form(default=None),
+    moc_title: str | None = Form(default=None),
     db: Session = Depends(get_db),
     user: User = Depends(require_admin),
 ):
@@ -211,6 +213,11 @@ async def job_import(
 
     `distill` defaults to false because the usual case is a restore, whose notes arrive with
     the archive. Set it when importing captured material that has no notes yet.
+
+    `moc`/`moc_title` are declared here for the same reason `/jobs/pdf` declares them: FastAPI
+    discards form fields a route does not name, so `wiki channel --moc` sent them and they
+    were silently dropped. `distill()` files into a Map of Content only when both are truthy,
+    so a whole course imported with no MOC entry and nothing reported it.
     """
     if not (file.filename or "").lower().endswith(".zip"):
         raise HTTPException(400, "Upload a .zip archive")
@@ -218,7 +225,13 @@ async def job_import(
     return _submit(
         db,
         "import",
-        {"filename": file.filename, "distill": distill},
+        {
+            "filename": file.filename,
+            "distill": distill,
+            # The CLI sends "" for an absent flag; normalise so distill() sees None, not "".
+            "moc": (moc or "").strip() or None,
+            "moc_title": (moc_title or "").strip() or None,
+        },
         base64.b64encode(data).decode(),
     )
 

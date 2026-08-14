@@ -1518,6 +1518,284 @@ def test_cli_writes_a_source_the_importer_can_read(tmp_path):
                 delete_doc(db, doc.slug)
 
 
+def _long_transcript(paragraphs: int = 320) -> str:
+    """A body several windows long, with paragraph breaks to cut on."""
+    return "\n\n".join(f"Paragraph {i}. " + ("filler " * 40) for i in range(paragraphs))
+
+
+def test_a_long_transcript_is_read_past_the_first_window(monkeypatch):
+    """SOURCE_CHARS truncated at 24k, and nothing reported the loss.
+
+    The first 62 lectures had a median transcript of 9,800 characters, so every one fitted and
+    truncation never showed. An 80-minute CS336 lecture runs to 69,000-92,000 characters, and
+    two thirds of each — including the half where the technical depth is — never reached the
+    model at all.
+    """
+    from wiki_api.services import distill as D
+
+    body = _long_transcript()
+    assert len(body) > 3 * D.SOURCE_CHARS
+
+    prompts = []
+
+    def fake(prompt, system):
+        prompts.append(prompt)
+        n = len(prompts)
+        return {"concepts": [{"name": f"Idea From Window {n}", "summary": "s", "why": "w"}]}
+
+    monkeypatch.setattr(D, "call_llm_json", fake)
+    concepts = D.extract_concepts_from("Long Lecture", body)
+
+    assert len(prompts) >= 3, "the transcript was read in one window"
+    # The decisive assertion: the end of the transcript reached the model.
+    assert body[-120:] in prompts[-1]
+    # Every window contributed, rather than the budget being spent on the opening.
+    assert len(concepts) == len(prompts)
+
+
+def test_a_short_source_is_read_in_exactly_one_call(monkeypatch):
+    """Chunking must not change how the wiki's existing sources distil."""
+    from wiki_api.services import distill as D
+
+    prompts = []
+
+    def fake(prompt, system):
+        prompts.append(prompt)
+        return {"concepts": [{"name": "Backpropagation", "summary": "s", "why": "w"}]}
+
+    monkeypatch.setattr(D, "call_llm_json", fake)
+    body = "A short transcript, of the length every existing lecture already has."
+    D.extract_concepts_from("Short", body)
+
+    assert len(prompts) == 1
+    assert body in prompts[0]
+
+
+def test_one_concept_named_twice_across_windows_becomes_one_concept(monkeypatch):
+    """Two windows of one lecture both name its central idea.
+
+    Left alone that forks a duplicate note, or spends a slot of the new-note budget
+    rediscovering a note the previous window already made.
+    """
+    from wiki_api.services import distill as D
+
+    replies = [
+        {"concepts": [{"name": "Attention Mechanism", "summary": "long summary", "why": "w"}]},
+        {"concepts": [{"name": "attention mechanisms", "summary": "s", "why": "w"}]},
+        {"concepts": [{"name": "Rotary Positional Encoding", "summary": "s", "why": "w"}]},
+        {"concepts": [{"name": "Speculative Decoding", "summary": "s", "why": "w"}]},
+    ]
+    calls = {"n": 0}
+
+    def fake(prompt, system):
+        reply = replies[min(calls["n"], len(replies) - 1)]
+        calls["n"] += 1
+        return reply
+
+    monkeypatch.setattr(D, "call_llm_json", fake)
+    concepts = D.extract_concepts_from("Long Lecture", _long_transcript())
+
+    names = [c.name for c in concepts]
+    assert names.count("Attention Mechanism") == 1
+    assert "attention mechanisms" not in names
+    # The variant the other window used is a real alias, and aliases resolve wikilinks.
+    attention = next(c for c in concepts if c.name == "Attention Mechanism")
+    assert "attention mechanisms" in attention.aliases
+    # A concept only the third window saw still survives.
+    assert "Rotary Positional Encoding" in names
+
+
+def test_the_new_note_budget_scales_with_transcript_length():
+    """Six new notes is right for a ten-minute clip and wrong for an eighty-minute lecture."""
+    from wiki_api.services import distill as D
+
+    assert D.max_new_for("x" * 9_800) == D.MAX_NEW_ZETTELS
+    assert D.max_new_for("x" * 69_000) > D.MAX_NEW_ZETTELS
+    # One pathological source cannot mint fifty stubs.
+    assert D.max_new_for("x" * 5_000_000) == D.MAX_NEW_CEILING
+
+
+def test_chunked_extraction_holds_no_session_across_any_window(monkeypatch):
+    """The pool-exhaustion bug, now with four model calls per source instead of one.
+
+    Holding a pooled connection across the model calls took the whole site down once. Chunking
+    multiplies the calls, so this property matters more than it did before.
+    """
+    import wiki_api.jobs.handlers as H
+    from wiki_api.database import session_scope
+    from wiki_api.services import distill as D
+    from wiki_api.services.content import delete_doc, store_source
+
+    open_sessions = {"count": 0, "during_llm": []}
+    real_scope = H.session_scope
+
+    class Tracking:
+        def __enter__(self):
+            open_sessions["count"] += 1
+            self._cm = real_scope()
+            return self._cm.__enter__()
+
+        def __exit__(self, *a):
+            open_sessions["count"] -= 1
+            return self._cm.__exit__(*a)
+
+    monkeypatch.setattr(H, "session_scope", lambda: Tracking())
+
+    # Patch the LLM layer, not the extract/summarise functions, so the real chunk loop runs.
+    def fake_json(prompt, system):
+        open_sessions["during_llm"].append(open_sessions["count"])
+        return {"concepts": []}
+
+    def fake_text(prompt, system):
+        open_sessions["during_llm"].append(open_sessions["count"])
+        return "A summary."
+
+    monkeypatch.setattr(D, "call_llm_json", fake_json)
+    monkeypatch.setattr(D, "call_llm", fake_text)
+    monkeypatch.setattr(D, "_neighbours", lambda db, concept, k=3: [])
+
+    made = []
+    try:
+        with session_scope() as db:
+            src, _ = store_source(
+                db, title="Long Pool Safety Source", body=_long_transcript(), subtype="paste"
+            )
+            made.append(src.slug)
+
+        ctx = H.JobContext(job_id=0, deadline=time.monotonic() + 300)
+        monkeypatch.setattr(ctx, "progress", lambda *a, **k: None)
+        result = H.handle_distill({"source_slug": made[0]}, ctx)
+        made += [result["literature"]] if result.get("literature") else []
+
+        assert len(open_sessions["during_llm"]) >= 4, "the windows never ran"
+        assert all(n == 0 for n in open_sessions["during_llm"]), (
+            f"a session was open during a model call: {open_sessions['during_llm']}"
+        )
+    finally:
+        with session_scope() as db:
+            for slug in made:
+                delete_doc(db, slug)
+
+
+def test_the_literature_note_reads_the_whole_source_not_its_opening(monkeypatch):
+    """A summary of the first third of a lecture presented itself as the summary of all of it."""
+    from wiki_api.services import distill as D
+
+    body = _long_transcript()
+    seen = {}
+    monkeypatch.setattr(D, "call_llm", lambda p, s: (seen.setdefault("prompt", p) and "") or "ok")
+    D.summarise_source("Long Lecture", body)
+
+    assert body[-120:] in seen["prompt"], "the close of the source never reached the model"
+    assert len(seen["prompt"]) < len(body), "the whole body was sent unbudgeted"
+
+
+def test_import_carries_the_moc_through_to_distillation(client, auth, monkeypatch):
+    """`wiki channel --moc` sent moc as a multipart field and FastAPI discarded it.
+
+    job_import declared only file and distill, so distill() saw moc=None — and it files into a
+    Map of Content only when both moc and moc_title are truthy. A whole course imported with
+    no MOC entry, and nothing reported it.
+    """
+    import io
+    import zipfile
+
+    from wiki_api.database import Job, session_scope
+    from wiki_api.jobs import runner as R
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr(
+            "sources/src-a.md", "---\ntitle: A\nclass: source\ntype: youtube\n---\n\nBody.\n"
+        )
+
+    res = client.post(
+        "/api/jobs/import",
+        files={"file": ("import.zip", buf.getvalue(), "application/zip")},
+        data={"distill": "false", "moc": "moc-cs336", "moc_title": "Stanford CS336"},
+        headers=auth,
+    )
+    assert res.status_code == 200, res.text
+    job_id = res.json()["id"]
+
+    try:
+        with session_scope() as db:
+            params = dict(db.get(Job, job_id).params or {})
+        assert params["moc"] == "moc-cs336"
+        assert params["moc_title"] == "Stanford CS336"
+
+        # …and that it survives the hop into the distill job the runner queues.
+        queued = []
+        monkeypatch.setattr(R, "enqueue", lambda db, kind, p, payload=None: queued.append(p))
+        R._queue_distillation("import", {**params, "distill": True}, {"sources": ["src-a"]})
+        assert queued and queued[0]["moc"] == "moc-cs336"
+    finally:
+        with session_scope() as db:
+            job = db.get(Job, job_id)
+            if job:
+                db.delete(job)
+                db.commit()
+
+
+def test_module_of_recognises_lecture_numbers():
+    """CS336 numbers lectures, not modules, so all 18 of them filed as "other"."""
+    from wiki_cli.capture import module_of
+
+    cs336 = "Stanford CS336 Language Modeling from Scratch | Spring 2026 | Lecture 4: Attention"
+    assert module_of(cs336) == "lecture-04"  # zero-padded so 4 sorts before 12
+    assert module_of(cs336.replace("Lecture 4", "Lecture 12")) == "lecture-12"
+    # The conventions the existing 62 sources were captured under must not move.
+    assert module_of("AIM - Module 2.4: Backpropagation") == "module-2"
+    assert module_of("Week 2 Live Session — Gradients") == "live-sessions"
+
+
+def test_course_boilerplate_is_stripped_without_touching_existing_titles():
+    """The importer derives the slug from the title, so normalising titles re-slugs sources.
+
+    "Stanford CS336 Language Modeling from Scratch | Spring 2026 | " spends 62 of a slug's 80
+    characters before saying anything. The pattern is anchored tightly because 196 sources are
+    already captured under their own titles, and a normaliser that caught one of those would
+    re-slug it and import a second copy.
+    """
+    from wiki_cli.capture import normalise_title
+    from wiki_core.utils import slugify
+
+    raw = "Stanford CS336 Language Modeling from Scratch | Spring 2026 | Lecture 4: Attention"
+    assert normalise_title(raw) == "CS336 Lecture 4: Attention"
+    assert slugify(normalise_title(raw)) == "cs336-lecture-4-attention"
+
+    for untouched in (
+        "AIM - Module 2.4: Backpropagation - The Chain Rule in Action",
+        "Week 2 Live Session — Backpropagation, Gradients & Jacobians",
+        "Admin API - Claude Platform Docs",
+        'Module 6.5: From "Attention" to Llama',
+    ):
+        assert normalise_title(untouched) == untouched
+
+
+def test_a_shortened_title_keeps_the_original_as_an_alias(tmp_path):
+    """The title YouTube published is still how you would search for the lecture."""
+    from wiki_api.database import session_scope
+    from wiki_api.services.content import delete_doc, import_markdown
+    from wiki_cli.capture import Video, write_source
+
+    raw = "Stanford CS336 Language Modeling from Scratch | Spring 2026 | Lecture 4: Attention"
+    path = write_source(
+        tmp_path, Video(id="c" * 11, title=raw), "Transcript.", "cs336", via="captions"
+    )
+
+    with session_scope() as db:
+        doc = import_markdown(db, path)
+        try:
+            assert doc.slug == "src-cs336-lecture-4-attention"
+            assert doc.title == "CS336 Lecture 4: Attention"
+            assert raw in (doc.extra or {}).get("aliases", [])
+            # The collection has to land, or crosslink cannot be scoped to this course.
+            assert doc.collection == "cs336"
+        finally:
+            delete_doc(db, doc.slug)
+
+
 def test_cli_capture_state_resumes_rather_than_restarting(tmp_path):
     from wiki_cli.capture import CaptureState, Video
 
