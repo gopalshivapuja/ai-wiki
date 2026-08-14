@@ -21,20 +21,31 @@ API_BASE = "https://openrouter.ai/api/v1"
 MODELS_CACHE_TTL = 3600
 
 # Preference ladder, ordered by what these models actually do when called — not by size on
-# paper. Measured 2026-08:
-#   nemotron-3.5-lightning:free      0.8s, 1M context  -> best fit for hour-long transcripts
-#   nemotron-3-ultra-550b-a55b:free  listed but the provider 404s; kept for when it recovers
-#   nemotron-3-super-120b-a12b:free  works, but 22.6s for eight tokens
-#   nemotron-3-nano-30b-a3b:free     0.7s, smaller context
+# paper.
+#
+# The head of the ladder is deliberately a *paid* model. Free models are free in money only:
+# the free Nemotron tier answered a distillation window in tens of seconds, which put a queue
+# of eighteen hour-long lectures a day away from finishing and made search and Ask AI feel
+# broken. gemini-2.5-flash-lite is the cheapest fast model that holds a whole window, and at
+# this wiki's volume it costs cents per bulk import — the right trade for a tool a person is
+# waiting on.
+#
+# Everything below the head is free, so an install with no credit still works: the ladder
+# degrades to Gemma rather than stopping. Measured 2026-08:
+#   google/gemini-2.5-flash-lite     fast, 1M context, paid -> the default
+#   google/gemma-4-31b-it:free       free fallback, the larger of the two
+#   google/gemma-4-26b-a4b-it:free   free fallback, sparser and quicker
+#   nvidia/nemotron-3.5-lightning:free  the previous default; kept as a last resort
 # Anything unlisted falls through to the generic free pool below.
 PREFERRED_MODELS = (
+    "google/gemini-2.5-flash-lite",
+    "google/gemma-4-31b-it:free",
+    "google/gemma-4-26b-a4b-it:free",
     "nvidia/nemotron-3.5-lightning:free",
-    "nvidia/nemotron-3-ultra-550b-a55b:free",
-    "nvidia/nemotron-3-super-120b-a12b:free",
-    "nvidia/nemotron-3-nano-30b-a3b:free",
 )
-# Second-tier ordering for whatever else the catalogue offers.
-PREFERRED_FREE_HINTS = ("nemotron", "deepseek", "llama", "qwen", "mistral", "gemma", "phi")
+# Second-tier ordering for whatever else the catalogue offers. Gemma leads for the same
+# reason it is the fallback above: it answers without narrating its reasoning first.
+PREFERRED_FREE_HINTS = ("gemma", "nemotron", "deepseek", "llama", "qwen", "mistral", "phi")
 
 # Never worth trying: responds 200 with empty content, which reads as a silent failure.
 BLOCKED_MODELS = {"openrouter/free", "openrouter/auto"}
@@ -105,9 +116,9 @@ def fetch_available_models(force: bool = False) -> tuple[list[str], str | None]:
 def get_models(min_context: int = 0) -> list[str]:
     """Ordered candidates to try.
 
-    Anything set in OPENROUTER_MODEL wins, then the measured Nemotron ladder, then whatever
-    else the catalogue offers free. `min_context` drops models too small to hold the input,
-    so a long transcript is not silently truncated into a worse note.
+    Anything set in OPENROUTER_MODEL wins, then the measured ladder above, then whatever else
+    the catalogue offers free. `min_context` drops models too small to hold the input, so a
+    long transcript is not silently truncated into a worse note.
     """
     configured = _configured_models()
     available, _error = fetch_available_models()
