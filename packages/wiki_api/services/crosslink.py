@@ -33,6 +33,8 @@ logger = logging.getLogger(__name__)
 # about the same thing, only in the same neighbourhood. The model does the discriminating.
 CANDIDATE_SIMILARITY = 0.55
 MAX_CANDIDATES = 8
+# Only these are subject matter worth joining to other subject matter.
+LINKABLE_SUBTYPES = ("zettel", "concept", "entity", "synthesis")
 MAX_ACCEPTED = 4
 SUMMARY_CHARS = 700
 
@@ -89,7 +91,12 @@ def candidates(db: Session, doc: Document, k: int = MAX_CANDIDATES) -> list[Docu
         if hit["slug"] in already or hit["slug"] == doc.slug:
             continue
         other = get_doc(db, hit["slug"])
-        if other is None or other.doc_class != NOTE or other.subtype in ("index", "moc"):
+        if other is None or other.doc_class != NOTE:
+            continue
+        # Ideas only. A literature note is already reachable from every concept it lists, so
+        # linking one here adds an edge without connecting two ideas — which is the entire
+        # point of this pass. Maps and the index are navigation, not subject matter.
+        if other.subtype in ("index", "moc", "literature"):
             continue
         # Concepts from the same source are already cross-linked by distillation.
         if doc.derived_from_id and other.derived_from_id == doc.derived_from_id:

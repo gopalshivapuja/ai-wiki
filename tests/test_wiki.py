@@ -1636,3 +1636,34 @@ def test_crosslink_writes_both_directions(client, auth, fake_embedder, monkeypat
         with session_scope() as db:
             for slug in made:
                 delete_doc(db, slug)
+
+
+def test_crosslink_proposes_ideas_not_paperwork(client, auth, fake_embedder):
+    """A literature note is already reachable from every concept it lists.
+
+    Linking one here adds an edge without joining two ideas, which is what this pass exists
+    to do — the first probe spent two of its three links exactly that way.
+    """
+    from wiki_api.database import session_scope
+    from wiki_api.services.content import create_note, delete_doc, get_doc, store_source
+    from wiki_api.services.crosslink import candidates
+
+    made = []
+    try:
+        with session_scope() as db:
+            src, _ = store_source(db, title="Idea Filter Source", body="widgets", subtype="paste")
+            made.append(src.slug)
+            subject = create_note(db, "Idea Filter Subject", "About widgets.", subtype="zettel")
+            concept = create_note(db, "Idea Filter Concept", "Widgets in depth.", subtype="zettel")
+            made += [subject.slug, concept.slug]
+            lit = create_note(
+                db, "Idea Filter Summary", "A source about widgets.", subtype="literature"
+            )
+            made.append(lit.slug)
+
+            found = {d.slug for d in candidates(db, get_doc(db, subject.slug))}
+            assert lit.slug not in found, "a literature note was proposed as an idea link"
+    finally:
+        with session_scope() as db:
+            for slug in made:
+                delete_doc(db, slug)
