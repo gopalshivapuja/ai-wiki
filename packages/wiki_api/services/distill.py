@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from sqlalchemy.orm import Session
@@ -35,14 +36,28 @@ from wiki_api.services.content import (
 
 logger = logging.getLogger(__name__)
 
-# How much of a source the model reads. Long transcripts are the norm, and the ladder now
-# prefers million-token models, but the useful signal is front-loaded.
+# How much of a source the model reads in one call, and the length below which a source takes
+# exactly one call, as it always has.
 SOURCE_CHARS = 24_000
+
+# Longer sources are read in successive windows rather than truncated. This was not a
+# theoretical limit: the wiki's first 62 lectures had a median transcript of 9,800 characters
+# and fitted whole, so truncation never showed. An 80-minute graduate lecture runs to 69,000
+# — 92,000 for the longest — and the old cap silently discarded roughly two thirds of every
+# one of them, including the second half where the technical depth is.
+CHUNK_OVERLAP = 1_500
+MAX_CHUNKS = 6  # a pathological source costs at most six calls, not fifty
+
+# The literature note reads a spread of the source rather than its opening third. One call
+# either way, so the wider view is free.
+SUMMARY_CHARS = 48_000
 
 # Ceiling on new notes per source. Without it, 62 lecture transcripts become 600 thin stubs
 # instead of a connected graph — the concepts that matter recur, and recurrence is what
-# earns a note.
+# earns a note. Six is right for a ten-minute clip and wrong for an eighty-minute lecture
+# covering a dozen distinct topics, so it applies per window, under an absolute ceiling.
 MAX_NEW_ZETTELS = 6
+MAX_NEW_CEILING = 18
 
 UNREVIEWED = "unreviewed"
 
@@ -168,17 +183,128 @@ def _concepts_from(data: dict, limit: int) -> list[Concept]:
     return out
 
 
+def _chunk_count(body: str) -> int:
+    """How many windows a body will be read in, without paying to split it."""
+    n = len(body or "")
+    if n <= SOURCE_CHARS:
+        return 1
+    return min(MAX_CHUNKS, -(-n // SOURCE_CHARS))
+
+
+def _chunks(body: str) -> list[str]:
+    """Split a long body into windows, cutting on paragraph boundaries where possible.
+
+    A body that already fits comes back as a single element, unchanged — so every source
+    under SOURCE_CHARS makes the same one call, with the same prompt, as it did before.
+    """
+    body = body or ""
+    if len(body) <= SOURCE_CHARS:
+        return [body]
+
+    out: list[str] = []
+    start = 0
+    while start < len(body) and len(out) < MAX_CHUNKS:
+        end = min(start + SOURCE_CHARS, len(body))
+        if end < len(body):
+            # Prefer a paragraph break late in the window; a mid-sentence cut costs a concept.
+            cut = body.rfind("\n\n", start + int(SOURCE_CHARS * 0.6), end)
+            if cut != -1:
+                end = cut
+        # Overlap backwards so an idea explained across a boundary is whole in one window.
+        out.append(body[max(0, start - CHUNK_OVERLAP) : end])
+        start = end
+    return out
+
+
+def max_new_for(body: str) -> int:
+    """Scale the new-note budget with how much of the source was actually read."""
+    return min(MAX_NEW_CEILING, MAX_NEW_ZETTELS * _chunk_count(body))
+
+
+def _merge_into(seen: dict[str, Concept], concept: Concept) -> None:
+    """Fold a concept into what earlier windows of the same source already produced.
+
+    Two windows of one lecture both name its central idea. Without folding, the second either
+    forks a duplicate note or burns a slot in the new-note budget rediscovering the first.
+    This happens with no session open, so it costs no database work at all.
+    """
+    key = _normalise(concept.name)
+    if not key:
+        return
+    prior = seen.get(key)
+    if prior is None:
+        seen[key] = concept
+        return
+    # The name this window used is a real alias, and resolution already consults aliases.
+    known = {a.casefold() for a in prior.aliases} | {prior.name.casefold()}
+    for alias in [concept.name, *concept.aliases]:
+        if alias.casefold() not in known:
+            prior.aliases.append(alias)
+            known.add(alias.casefold())
+    prior.aliases = prior.aliases[:5]
+    if len(concept.summary) > len(prior.summary):
+        prior.summary = concept.summary
+    prior.why = prior.why or concept.why
+    prior.confuse = prior.confuse or concept.confuse
+    have = {_normalise(r.name) for r in prior.relates_to}
+    for rel in concept.relates_to:
+        if _normalise(rel.name) not in have:
+            prior.relates_to.append(rel)
+            have.add(_normalise(rel.name))
+    prior.relates_to = prior.relates_to[:6]
+
+
+def _interleave(per_chunk: list[list[Concept]]) -> list[Concept]:
+    """Take each window's most central concept before any window's second.
+
+    Order decides who gets the new-note budget. Concatenating would spend it all on the first
+    twenty minutes of a lecture and mint nothing from the last forty.
+    """
+    out: list[Concept] = []
+    for rank in range(max((len(c) for c in per_chunk), default=0)):
+        out += [c[rank] for c in per_chunk if rank < len(c)]
+    return out
+
+
 def extract_concepts(source: Document, limit: int = 8) -> list[Concept]:
     return extract_concepts_from(source.title, source.body or "", limit)
 
 
-def extract_concepts_from(title: str, body: str, limit: int = 8) -> list[Concept]:
-    """The model call, taking plain strings so it can run with no database session open."""
-    data = call_llm_json(
-        _EXTRACT_PROMPT.format(limit=limit, title=title, body=(body or "")[:SOURCE_CHARS]),
-        _EXTRACT_SYSTEM,
-    )
-    return _concepts_from(data, limit)
+def extract_concepts_from(
+    title: str,
+    body: str,
+    limit: int = 8,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> list[Concept]:
+    """The model calls, taking plain strings so they run with no database session open.
+
+    One call per window. Holding no session is load-bearing rather than tidy: an earlier
+    version kept a pooled connection open across the model calls, and a queue of distillations
+    exhausted the pool and returned 500s for every request, the site included. Chunking
+    multiplies the calls, so the property matters more here than it did before — which is why
+    the cross-window deduplication below is deliberately pure.
+    """
+    windows = _chunks(body or "")
+    per_chunk: list[list[Concept]] = []
+    for i, window in enumerate(windows, start=1):
+        if on_progress:
+            on_progress(i, len(windows))
+        try:
+            data = call_llm_json(
+                _EXTRACT_PROMPT.format(limit=limit, title=title, body=window), _EXTRACT_SYSTEM
+            )
+        except Exception as exc:
+            # One bad window must not cost the other five.
+            logger.warning(
+                "Extraction failed for window %d/%d of %r: %s", i, len(windows), title, exc
+            )
+            continue
+        per_chunk.append(_concepts_from(data, limit))
+
+    seen: dict[str, Concept] = {}
+    for concept in _interleave(per_chunk):
+        _merge_into(seen, concept)
+    return list(seen.values())
 
 
 # --- convergence --------------------------------------------------------------
@@ -518,13 +644,16 @@ def _write_cross_links(db: Session, concepts: list[Concept], placed: dict[str, s
     side is half a relationship.
     """
     by_name = {name.casefold(): slug for name, slug in placed.items()}
+    # A relation stated in one window may name a concept the way a different window titled it,
+    # so fall back to the same folding that converges the names themselves.
+    by_norm = {_normalise(name): slug for name, slug in placed.items()}
     written = 0
     for concept in concepts:
         source_slug = placed.get(concept.name)
         if not source_slug:
             continue
         for rel in concept.relates_to:
-            target = by_name.get(rel.name.casefold())
+            target = by_name.get(rel.name.casefold()) or by_norm.get(_normalise(rel.name))
             if not target or target == source_slug:
                 continue
             _append_related(db, source_slug, [(target, rel.reason)])
@@ -552,11 +681,27 @@ SOURCE: {title}
 {body}"""
 
 
+def _reading_window(body: str, budget: int) -> str:
+    """Opening, evenly spaced middles and the close, for a body too long to send whole.
+
+    A literature note that read only the first third of an eighty-minute lecture described a
+    third of it while presenting itself as the summary of the whole.
+    """
+    body = body or ""
+    if len(body) <= budget:
+        return body
+    slices = 4
+    take = budget // slices
+    step = (len(body) - take) // (slices - 1)
+    return "\n\n[…]\n\n".join(body[i * step : i * step + take] for i in range(slices))
+
+
 def summarise_source(title: str, body: str) -> str:
     """The literature-note model call, taking plain strings so it needs no session."""
     try:
         return call_llm(
-            _SUMMARY_PROMPT.format(title=title, body=(body or "")[:SOURCE_CHARS]), _SUMMARY_SYSTEM
+            _SUMMARY_PROMPT.format(title=title, body=_reading_window(body, SUMMARY_CHARS)),
+            _SUMMARY_SYSTEM,
         )
     except Exception as exc:
         logger.warning("Summary failed for %s: %s", title, exc)

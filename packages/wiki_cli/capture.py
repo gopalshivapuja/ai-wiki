@@ -193,10 +193,36 @@ def _paragraphs(segments: list[dict]) -> str:
     return "\n\n".join(out)
 
 
+# University courses repeat their own name in every video title. Stanford CS336 spends
+# "Stanford CS336 Language Modeling from Scratch | Spring 2026 | " — 62 characters — before
+# saying anything, and a slug has 80 to work with, so eighteen lectures would produce eighteen
+# slugs distinguished only by their final few characters.
+#
+# The pattern is anchored on "Stanford CS<digits>" followed by two pipe-separated segments,
+# which matches none of the 196 sources already captured. That is checked by a test rather
+# than asserted here, because the slug is derived from the title: a normaliser that caught an
+# existing title would re-slug a source already in the database and import it a second time.
+_COURSE_BOILERPLATE = re.compile(r"^Stanford\s+(CS\d+)\b[^|]*\|\s*[^|]*\|\s*", re.I)
+
+
+def normalise_title(title: str) -> str:
+    """Cut a course's repeated boilerplate, keeping the part that identifies the lecture."""
+    short = _COURSE_BOILERPLATE.sub(r"\1 ", title)
+    # Escapes rather than literals: these are en and em dashes, which lecture titles use as
+    # separators and which are indistinguishable from a hyphen on sight.
+    short = re.sub(r"\s+", " ", short).strip(" -\u2013\u2014:|")
+    return short or title
+
+
 def module_of(title: str) -> str:
     m = re.search(r"Module\s+(\d+)\.", title)
     if m:
         return f"module-{m.group(1)}"
+    # Graduate courses number lectures, not modules. Zero-padded so lecture-02 sorts before
+    # lecture-10 rather than after it.
+    m = re.search(r"\bLecture\s+(\d+)\b", title, re.I)
+    if m:
+        return f"lecture-{int(m.group(1)):02d}"
     return "live-sessions" if ("Live Session" in title or "Week" in title) else "other"
 
 
@@ -206,14 +232,21 @@ def write_source(out_dir: Path, video: Video, text: str, collection: str, via: s
     from wiki_core.utils import slugify
 
     url = f"https://www.youtube.com/watch?v={video.id}"
+    # The importer derives the slug from the title, not from this filename, so shortening the
+    # title is what shortens the slug.
+    short = normalise_title(video.title)
     front = {
-        "title": video.title,
+        "title": short,
         "class": "source",
         "type": "youtube",
         "url": url,
         "collection": collection,
-        "module": module_of(video.title),
+        "module": module_of(video.title),  # matched against the full title
     }
+    if short != video.title:
+        # The title as YouTube published it is still how you would search for the lecture,
+        # and an alias is a wikilink target too.
+        front["aliases"] = [video.title]
     # yaml.safe_dump rather than f-string quoting: one lecture title contained its own double
     # quotes and produced frontmatter that silently failed to parse.
     meta = yaml.safe_dump(front, allow_unicode=True, sort_keys=False).strip()
@@ -224,10 +257,12 @@ def write_source(out_dir: Path, video: Video, text: str, collection: str, via: s
     )
     minutes = f" · {video.duration // 60}m" if video.duration else ""
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"src-{slugify(video.title)}"[:80]
+    # Must slugify the same string the importer will, or cmd_channel's "we already have this
+    # slug" check stops matching and every transcript is imported a second time.
+    path = out_dir / f"src-{slugify(short)}"[:80]
     path = path.with_suffix(".md")
     path.write_text(
-        f"---\n{meta}\n---\n\n# {video.title}\n\n"
+        f"---\n{meta}\n---\n\n# {short}\n\n"
         f"**Video:** [{url}]({url}){minutes}\n{note}\n## Transcript\n\n{text}\n"
     )
     return path

@@ -524,6 +524,11 @@ def import_markdown(db: Session, path: Path, subtype_hint: str | None = None) ->
             doc.url = fm["url"]
         if fm.get("aliases"):
             doc.extra = {**(doc.extra or {}), "aliases": fm["aliases"]}
+        # to_markdown() has always emitted `collection` and import dropped it, so every
+        # imported source landed with collection NULL — which silently reduced
+        # POST /api/jobs/crosslink {"collection": ...} to matching nothing.
+        if fm.get("collection"):
+            doc.collection = str(fm["collection"])
         doc.updated_at = utcnow()
     else:
         doc = Document(
@@ -537,6 +542,7 @@ def import_markdown(db: Session, path: Path, subtype_hint: str | None = None) ->
             url=fm.get("url"),
             immutable=doc_class == SOURCE,
             derived_from_id=derived_from_id,
+            collection=str(fm["collection"]) if fm.get("collection") else None,
             extra={"aliases": fm["aliases"]} if fm.get("aliases") else {},
         )
         db.add(doc)
