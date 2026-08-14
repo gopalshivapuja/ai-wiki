@@ -80,6 +80,12 @@ Every ingest path ends at the same place, so it does not matter which one you us
 3. **Concepts are extracted** and converged against what exists already, by name and by
    meaning, so a concept met in a second source links to the note that covers it rather than
    forking a near-duplicate.
+   A source longer than `SOURCE_CHARS` (24,000) is read in successive windows rather than
+   truncated, and its new-note budget scales with its length. This matters more than it
+   sounds: a 10-minute clip is ~10,000 characters and fits whole, but an 80-minute lecture
+   runs to 70,000–90,000, and reading only the first window discards the second half of it
+   silently. Concepts named in more than one window are folded into one, keeping the other
+   name as an alias.
 4. **Links are written in both directions**, each with a stated reason.
 5. Everything is filed under a **map of content** if you passed `--moc`.
 6. Every document is **embedded**, so it is findable by meaning immediately.
@@ -106,8 +112,12 @@ its contents can be corrupt and still look fine — that is how an unreadable ba
 ## Scale
 
 The queue runs one job at a time, so a large import takes hours. That is deliberate: each
-distillation makes two model calls, and running them concurrently exhausted the database
-connection pool once and took the site down with it.
+distillation makes at least two model calls — more for a long source, one per window — and
+running them concurrently exhausted the database connection pool once and took the site down
+with it.
+
+Long lectures cost proportionally more. Eighteen 80-minute lectures are ~70 model calls rather
+than ~36, so queue them in batches and let each drain before the next.
 
 Queue a large batch and leave it. Nothing is lost to a redeploy — the queue is a database
 table — and `wiki status` tells you the real depth, not just the newest page.
