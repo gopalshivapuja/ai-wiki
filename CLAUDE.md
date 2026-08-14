@@ -74,6 +74,23 @@ The reason this exists: only 1.7% of edges once joined one idea to another, beca
 distillation linked a note to its source and stopped. If you change `distill.py`, keep
 `_write_cross_links` and the `## Related` section — they are the fix.
 
+### Long sources are read in windows, not truncated
+
+`SOURCE_CHARS` (24,000) is what the model reads **per call**, not per source. Beyond it,
+`_chunks()` splits the body and `extract_concepts_from()` makes one call per window, folding
+the results with the same `_normalise()` that converges concepts across sources; `max_new_for()`
+scales the new-note budget with length. A body under `SOURCE_CHARS` still makes exactly one
+call with exactly the same prompt, so nothing already stored distils differently.
+
+This was invisible for a year: the first 62 lectures had a median transcript of 9,800
+characters and fitted whole. Stanford CS336's 80-minute lectures are 69,000–92,000, and the
+old cap discarded two thirds of each without logging anything. If you touch the windowing,
+keep `_interleave` — concatenating instead spends the whole note budget on a lecture's first
+twenty minutes.
+
+The model calls must stay session-free (see `handle_distill`'s three phases). Chunking
+multiplies them, so violating that now fails faster than the pool exhaustion it caused before.
+
 ### LLM access
 
 `GET /api/llms.txt` is the machine-readable map, and `packages/wiki_mcp` is a read-only MCP
