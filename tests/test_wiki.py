@@ -233,6 +233,18 @@ def test_export_import_round_trip(client, auth):
     """The durability story: everything must survive a trip through the archive."""
     before = client.get("/api/stats", headers=auth).json()
 
+    # Give a source a collection first. to_markdown() has always written this field and
+    # import_markdown() silently dropped it, so the round trip lost it and every imported
+    # source landed with collection NULL — which left crosslink's collection filter matching
+    # nothing. Counting notes and links would never have caught that.
+    from wiki_api.database import session_scope
+    from wiki_api.services.content import get_doc, list_docs
+
+    with session_scope() as db:
+        collected_slug = list_docs(db, doc_class="source", limit=1)[0].slug
+        get_doc(db, collected_slug).collection = "round-trip-collection"
+        db.commit()
+
     data = client.get("/api/export", headers=auth).content
     names = zipfile.ZipFile(io.BytesIO(data)).namelist()
     assert len(names) > before["total_notes"]
@@ -251,6 +263,9 @@ def test_export_import_round_trip(client, auth):
     after = client.get("/api/stats", headers=auth).json()
     assert after["total_notes"] == before["total_notes"]
     assert after["total_wikilinks"] == before["total_wikilinks"]
+
+    restored = client.get("/api/documents?collection=round-trip-collection", headers=auth).json()
+    assert collected_slug in [d["slug"] for d in restored["documents"]]
 
 
 # --- jobs ---------------------------------------------------------------------
